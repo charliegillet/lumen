@@ -2,8 +2,26 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { openDb, type Db } from '../../src/server/db.js';
 import { ConversationActor } from '../../src/server/actor.js';
 import { resetFake, setFakeScript, type FakeReply } from '../../src/server/llm/fake.js';
-import { BUDGET, runTurn } from '../../src/server/orchestrator/turn.js';
+import { BUDGET, GATE_TIMEOUT_MS, runTurn } from '../../src/server/orchestrator/turn.js';
 import type { AgentId, ConvEvent } from '../../src/shared/events.js';
+
+// Lets a test make chosen structured calls (gate/dedup) hang until their
+// signal aborts, like a provider that never answers.
+const hooks = vi.hoisted(() => ({ hang: null as null | ((meta: { kind: string; agentId?: string }) => boolean) }));
+vi.mock('../../src/server/llm/stream.js', async (importOriginal) => {
+  const m = await importOriginal<typeof import('../../src/server/llm/stream.js')>();
+  const hangUntilAbort = (signal?: AbortSignal) =>
+    new Promise<never>((_, reject) => {
+      const fail = () => reject(Object.assign(new Error('The operation was aborted'), { name: 'AbortError' }));
+      if (signal?.aborted) fail();
+      else signal?.addEventListener('abort', fail, { once: true });
+    });
+  return {
+    ...m,
+    generateStructured: ((a: Parameters<typeof m.generateStructured>[0]) =>
+      hooks.hang?.(a.meta) ? hangUntilAbort(a.signal) : m.generateStructured(a)) as typeof m.generateStructured,
+  };
+});
 
 type Started = Extract<ConvEvent, { type: 'message_started' }>;
 interface GateAns {
@@ -51,6 +69,7 @@ beforeEach(() => {
   process.env.MODEL_GATE = 'fake:x';
   process.env.MODEL_CLASSIFIER = 'fake:x';
   resetFake();
+  hooks.hang = null;
   db = openDb(':memory:');
   actor = new ConversationActor(db, 'c1');
   actor.append({ type: 'user_message', messageId: 'u1', clientMsgId: 'cm1', text: 'What should we build?' });
@@ -60,6 +79,7 @@ afterEach(() => {
   delete process.env.MODEL_GATE;
   delete process.env.MODEL_CLASSIFIER;
   resetFake();
+  hooks.hang = null;
   db.close();
   vi.restoreAllMocks();
 });
@@ -275,5 +295,52 @@ describe('runTurn', () => {
     expect(b.length).toBeGreaterThanOrEqual(1);
     expect(b.every((e) => e.agentId !== 'maya' && e.replyTo === 'u2')).toBe(true);
     expect(actor.turnAbort).toBeNull();
+  });
+
+  describe('hung gates', () => {
+    const SHORT_MS = 50;
+    beforeEach(() => {
+      const real = AbortSignal.timeout.bind(AbortSignal);
+      vi.spyOn(AbortSignal, 'timeout').mockImplementation((ms) => real(ms === GATE_TIMEOUT_MS ? SHORT_MS : ms));
+    });
+
+    it('a hanging gate counts as a declined bid', async () => {
+      hooks.hang = (m) => m.kind === 'gate' && m.agentId === 'theo';
+      script({
+        gate: (id, n) => (id === 'maya' && n === 0 ? { should_respond: true, novelty: 2, gist: 'x' } : QUIET),
+        reply: () => ({ chunks: ['Done.'], delayMs: 5 }),
+      });
+      await runTurn(actor, { triggerMessageId: 'u1', forced: [] });
+      expect(started().map((e) => [e.agentId, e.hop])).toEqual([['maya', 0]]);
+      expect(AbortSignal.timeout).toHaveBeenCalledWith(GATE_TIMEOUT_MS);
+    });
+
+    it('hop 0 still has a speaker when every gate hangs', async () => {
+      hooks.hang = (m) => m.kind === 'gate';
+      script({ gate: () => QUIET, reply: () => ({ chunks: ['Hi.'], delayMs: 5 }) });
+      await runTurn(actor, { triggerMessageId: 'u1', forced: [] });
+      expect(started().map((e) => [e.agentId, e.hop])).toEqual([['maya', 0]]);
+    });
+
+    it('a hanging dedup degrades to singletons', async () => {
+      hooks.hang = (m) => m.kind === 'dedup';
+      script({
+        gate: (id, n) => (n === 0 && id !== 'priya' ? { should_respond: true, novelty: 2, gist: `${id} point` } : QUIET),
+        reply: () => ({ chunks: ['Ok.'], delayMs: 5 }),
+      });
+      await runTurn(actor, { triggerMessageId: 'u1', forced: [] });
+      expect(started().map((e) => e.agentId)).toEqual(['maya', 'theo']);
+    });
+
+    it('a real turn abort during gating still ends the turn', async () => {
+      hooks.hang = (m) => m.kind === 'gate';
+      script({ gate: () => QUIET, reply: () => ({ chunks: ['Hi.'], delayMs: 5 }) });
+      const turn = runTurn(actor, { triggerMessageId: 'u1', forced: [] });
+      await sleep(5);
+      actor.turnAbort?.abort();
+      await turn;
+      await sleep(SHORT_MS * 2);
+      expect(started()).toEqual([]);
+    });
   });
 });

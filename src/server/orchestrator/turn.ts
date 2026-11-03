@@ -8,6 +8,8 @@ import { runGate, type Bid } from './gate.js';
 import { startGeneration, type Generation } from './generation.js';
 
 export const BUDGET = { maxAgentMessages: 7, maxHops: 3, turnTimeoutMs: 90_000 };
+/** Per-call cap on one gate or dedup request, so one hung call cannot stall a wave. */
+export const GATE_TIMEOUT_MS = 8000;
 
 const isAbort = (e: unknown) => e instanceof Error && e.name === 'AbortError';
 
@@ -67,9 +69,16 @@ async function waves(
     const candidates = AGENT_IDS.filter((id) => !live.has(id) && !forced.includes(id));
 
     const cutoff = actor.lastSeq;
-    const bids = await Promise.all(candidates.map((id) => runGate(actor, id, cutoff, hop, signal)));
+    const bids = await Promise.all(
+      candidates.map((id) =>
+        runGate(actor, id, cutoff, hop, capped(signal)).catch((err: unknown) => {
+          if (signal.aborted) throw err; // the turn itself was aborted
+          return declined(id); // timed out: same as staying quiet
+        }),
+      ),
+    );
     if (signal.aborted) return;
-    const clusters = await clusterGists(bids, signal); // swallows AbortError
+    const clusters = await clusterGists(bids, capped(signal)); // swallows aborts and timeouts
     if (signal.aborted || !inTime()) return;
 
     const selected = selectSpeakers(bids, clusters, {
@@ -118,6 +127,17 @@ async function waves(
     if (wave.length === 0) return;
   }
 }
+
+const capped = (signal: AbortSignal) => AbortSignal.any([signal, AbortSignal.timeout(GATE_TIMEOUT_MS)]);
+
+const declined = (agentId: AgentId): Bid => ({
+  agentId,
+  should_respond: false,
+  novelty: 0,
+  gist: '',
+  addresses: [],
+  effort: 'low',
+});
 
 /** Keep at most `room` speakers, forced ones first; launch order stays AGENT_IDS order. */
 function cutToBudget<T extends { agentId: AgentId }>(speakers: T[], forced: AgentId[], room: number): T[] {
