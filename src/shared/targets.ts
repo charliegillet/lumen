@@ -17,7 +17,10 @@ const IDS = Object.keys(AGENT_NAMES) as TargetAgentId[];
 const BROADCAST_SRC = "everyone|everybody|all of you|both of you|you all|y'all|guys";
 const BROADCAST_ANY = new RegExp(`(?<![\\w'])(?:${BROADCAST_SRC})(?![\\w'])`, 'i');
 const BROADCAST_LEAD = new RegExp(`^(?:${BROADCAST_SRC})(?![\\w'])`, 'i');
-const STOP_RE = /^(stop|wait|hold on|enough|shh|quiet)\b/i;
+// A bare stop only ("Theo, stop", "everyone hold on please"). A stop word
+// followed by an instruction ("Theo wait, focus on pricing") is a steer and
+// goes through the classifier.
+const STOP_RE = /^(stop|wait|hold on|enough|shh|quiet)(\s+(please|everyone|all|now))?\W*$/i;
 // Ordinary words that sit within edit distance 1 of a name.
 const NOT_NAMES = new Set(['many', 'then', 'they', 'them', 'thee', 'mayo', 'the', 'prima', 'mays', 'thea', 'mama']);
 
