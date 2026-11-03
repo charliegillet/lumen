@@ -184,8 +184,12 @@ async function handle(actor: ConversationActor, userMessageId: string, userSeq: 
     }
 
     // 4. New message. Never dropped: if the agents who would answer are all
-    //    still writing, wait for them, then take a turn.
-    const forced = regex.targets;
+    //    still writing, wait for them, then take a turn. A named agent that
+    //    already started a message after this one (gated in while we
+    //    classified) is answering it already and is not forced again.
+    const named0 = regex.targets;
+    const forced = named0.filter((id) => !startedAfter(actor, id, userSeq));
+    if (named0.length > 0 && forced.length === 0) return;
     const live = [...actor.generations.values()];
     const busy = forced.length > 0 ? live.filter((g) => forced.includes(g.agentId)) : live;
     const mustWait =
@@ -350,8 +354,12 @@ function stopAt(actor: ConversationActor, g: Generation, rendered: Record<string
   }
 }
 
+/** Has this agent started a message after `seq`? */
+const startedAfter = (a: ConversationActor, id: AgentId, seq: number) =>
+  a.view.messages.some((m) => m.author.kind === 'agent' && m.author.agentId === id && m.startSeq > seq);
 /** May queued work for the message at `seq` still start this agent? */
-const startable = (a: ConversationActor, id: AgentId, seq: number) => !stoppedSince(a, id, seq);
+const startable = (a: ConversationActor, id: AgentId, seq: number) =>
+  !stoppedSince(a, id, seq) && !startedAfter(a, id, seq);
 
 /** Chars the client displayed, or `fallback` when it sent nothing usable. */
 function shown(rendered: Record<string, number>, messageId: string, fallback: number): number {
