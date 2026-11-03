@@ -66,15 +66,15 @@ function abortError(): Error {
 export async function generateStructured<T>(a: {
   role: Role;
   system: string;
-  prompt: string;
   schema: z.ZodType<T>;
   signal?: AbortSignal;
   meta: ReqMeta;
-}): Promise<T> {
+} & ({ prompt: string; messages?: undefined } | { messages: ModelMessage[]; prompt?: undefined })): Promise<T> {
+  const input = a.messages ? { messages: a.messages } : { prompt: a.prompt as string };
   const { output } = await generateText({
     model: modelFor(a.role, a.meta.agentId),
     system: a.system,
-    prompt: a.prompt,
+    ...input,
     output: Output.object({ schema: a.schema }),
     abortSignal: a.signal,
     headers: metaHeaders(a.meta),
