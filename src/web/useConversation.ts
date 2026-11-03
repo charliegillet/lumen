@@ -28,16 +28,19 @@ export interface ClientState {
   /** messageId -> words kept on screen while a rewrite has produced nothing yet. */
   held: Map<string, string>;
   pendingSends: PendingSend[];
-  /** server messageId -> clientMsgId, so a confirmed bubble keeps its React key. */
-  keys: Map<string, string>;
 }
 
 export type ShownMessage = MessageView & { key: string; pending: boolean; failed: boolean };
 
-export const SAFETY_UNFREEZE_MS = 2000;
+/**
+ * A freeze is released after this long even if the server never says so.
+ * Longer than the server's 6 s classifier cap: unfreezing earlier would show
+ * buffered words that the steer then cuts back.
+ */
+export const SAFETY_UNFREEZE_MS = 7000;
 
 export function initialState(view: ConversationView = emptyView): ClientState {
-  return { view, frozen: new Map(), held: new Map(), pendingSends: [], keys: new Map() };
+  return { view, frozen: new Map(), held: new Map(), pendingSends: [] };
 }
 
 export function displayedText(s: ClientState, m: MessageView): string {
@@ -96,12 +99,9 @@ export function onEvent(s: ClientState, e: ConvEvent): ClientState {
   const next: ClientState = { ...s, view };
 
   switch (e.type) {
-    case 'user_message': {
+    case 'user_message':
       if (!s.pendingSends.some((p) => p.clientMsgId === e.clientMsgId)) return next;
-      const keys = new Map(s.keys);
-      keys.set(e.messageId, e.clientMsgId);
-      return { ...next, keys, pendingSends: s.pendingSends.filter((p) => p.clientMsgId !== e.clientMsgId) };
-    }
+      return { ...next, pendingSends: s.pendingSends.filter((p) => p.clientMsgId !== e.clientMsgId) };
     case 'steer_resolved': {
       const ids = view.messages
         .filter((m) => s.frozen.has(m.id) && !(m.author.kind === 'agent' && e.targets.includes(m.author.agentId)))
@@ -168,14 +168,24 @@ export function failPending(s: ClientState, clientMsgId: string, failed: boolean
   };
 }
 
-/** Replace the view wholesale (initial load, or recovery after a gap). */
+/**
+ * Replace the view wholesale (initial load, or recovery after a gap).
+ * Freezes survive on messages that are still streaming; unconfirmed sends
+ * the snapshot already contains are dropped.
+ */
 export function withSnapshot(s: ClientState, view: ConversationView): ClientState {
+  const byId = new Map(view.messages.map((m) => [m.id, m]));
+  const frozen = new Map([...s.frozen].filter(([id]) => byId.get(id)?.status === 'streaming'));
+  const held = new Map([...s.held].filter(([id]) => byId.get(id)?.text === ''));
+  const sent = new Set(view.messages.flatMap((m) => (m.clientMsgId ? [m.clientMsgId] : [])));
   return {
     ...s,
     view,
-    frozen: new Map(),
-    held: new Map(),
-    pendingSends: s.pendingSends.filter((p) => p.seq === null || p.seq > view.lastSeq),
+    frozen,
+    held,
+    pendingSends: s.pendingSends.filter(
+      (p) => !sent.has(p.clientMsgId) && (p.seq === null || p.seq > view.lastSeq),
+    ),
   };
 }
 
@@ -184,7 +194,8 @@ export function shownMessages(s: ClientState): ShownMessage[] {
   const out: ShownMessage[] = [];
   for (const m of visibleMessages(s.view)) {
     if (m.author.kind === 'agent' && displayedText(s, m) === '') continue; // no words yet
-    out.push({ ...m, key: s.keys.get(m.id) ?? m.id, pending: false, failed: false });
+    // Keyed by clientMsgId so a confirmed send does not remount its bubble.
+    out.push({ ...m, key: m.clientMsgId ?? m.id, pending: false, failed: false });
   }
   for (const p of s.pendingSends) {
     out.push({
@@ -260,13 +271,42 @@ export function useConversation(id: string): Conversation {
     });
   }, []);
 
+  // Every freeze, whoever caused it (a send, Stop, a stop_all from elsewhere,
+  // a snapshot that kept it), is released after SAFETY_UNFREEZE_MS at the latest.
+  const timers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
+  const arm = useCallback((ids: Iterable<string>) => {
+    for (const id of ids) {
+      const prev = timers.current.get(id);
+      if (prev !== undefined) clearTimeout(prev);
+      const t = setTimeout(() => {
+        timers.current.delete(id);
+        latest.current = unfreeze(latest.current, [id]);
+        setState(latest.current);
+      }, SAFETY_UNFREEZE_MS);
+      timers.current.set(id, t);
+    }
+  }, []);
+  useEffect(() => {
+    const map = timers.current;
+    return () => {
+      for (const t of map.values()) clearTimeout(t);
+      map.clear();
+    };
+  }, []);
+
+  /** Applies f; `now` renders synchronously; `rearm` restarts every freeze's timer. */
   const update = useCallback(
-    (f: (s: ClientState) => ClientState, now = false) => {
-      latest.current = f(latest.current);
+    (f: (s: ClientState) => ClientState, now = false, rearm = false) => {
+      const before = latest.current;
+      const after = f(before);
+      latest.current = after;
+      const ids = [...after.frozen.keys()].filter((k) => rearm || !before.frozen.has(k));
+      if (ids.length > 0) arm(ids);
       if (now) flushNow();
       else schedule();
+      return after;
     },
-    [flushNow, schedule],
+    [arm, flushNow, schedule],
   );
 
   // Snapshot, then the live stream from its seq. A gap means we missed
@@ -293,7 +333,7 @@ export function useConversation(id: string): Conversation {
         if (!res.ok) throw new Error(`snapshot: ${res.status}`);
         const { view } = (await res.json()) as { view: ConversationView };
         if (disposed) return;
-        update((s) => withSnapshot(s, view), true);
+        update((s) => withSnapshot(s, view), true, true);
         setLoaded(true);
       } catch {
         restart(backoff);
@@ -339,28 +379,6 @@ export function useConversation(id: string): Conversation {
     };
   }, [base, update]);
 
-  const timers = useRef(new Set<ReturnType<typeof setTimeout>>());
-  useEffect(() => {
-    const set = timers.current;
-    return () => {
-      for (const t of set) clearTimeout(t);
-    };
-  }, []);
-
-  /** Whatever a freeze froze is released after a while, come what may. */
-  const releaseLater = useCallback(
-    (before: ClientState, after: ClientState) => {
-      const ids = [...after.frozen.keys()].filter((k) => !before.frozen.has(k));
-      if (ids.length === 0) return;
-      const t = setTimeout(() => {
-        timers.current.delete(t);
-        update((s) => unfreeze(s, ids));
-      }, SAFETY_UNFREEZE_MS);
-      timers.current.add(t);
-    },
-    [update],
-  );
-
   const post = useCallback(
     (clientMsgId: string) => {
       const info = sendInfo.current.get(clientMsgId);
@@ -380,15 +398,12 @@ export function useConversation(id: string): Conversation {
       const text = raw.trim();
       if (text === '') return;
       const clientMsgId = uuid();
-      const before = latest.current;
-      const after = freezeFor(addPending(before, clientMsgId, text), text);
-      latest.current = after;
-      flushNow(); // what is frozen is exactly what is on screen
-      releaseLater(before, after);
+      // Rendered now, so what is frozen is exactly what is on screen.
+      const after = update((s) => freezeFor(addPending(s, clientMsgId, text), text), true);
       sendInfo.current.set(clientMsgId, { text, typingStartedAt, rendered: renderedCounts(after) });
       post(clientMsgId);
     },
-    [flushNow, post, releaseLater],
+    [post, update],
   );
 
   const retry = useCallback(
@@ -402,14 +417,11 @@ export function useConversation(id: string): Conversation {
   const stop = useCallback(() => {
     const before = latest.current;
     if (!before.view.messages.some((m) => m.status === 'streaming')) return;
-    const after = freezeAll(before);
-    latest.current = after;
-    flushNow();
-    releaseLater(before, after);
+    const after = update(freezeAll, true);
     postJson(`${base}/stop`, { clientReqId: uuid(), rendered: renderedCounts(after) }).catch(() => {
       update((s) => unfreeze(s, [...after.frozen.keys()].filter((k) => !before.frozen.has(k))));
     });
-  }, [base, flushNow, releaseLater, update]);
+  }, [base, update]);
 
   const messages = useMemo(() => shownMessages(state), [state]);
   const displayed = useCallback((m: MessageView) => displayedText(state, m), [state]);

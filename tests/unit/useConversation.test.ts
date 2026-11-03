@@ -11,6 +11,7 @@ import {
   initialState,
   onEvent,
   renderedCounts,
+  SAFETY_UNFREEZE_MS,
   shownMessages,
   unfreeze,
   withSnapshot,
@@ -213,9 +214,29 @@ describe('client conversation state', () => {
     expect(onEvent(s, delta(5, 'B', 'dup'))).toBe(s);
   });
 
-  it('a snapshot clears freezes', () => {
+  it('a snapshot drops freezes on messages that are gone', () => {
     const s = withSnapshot(freezeFor(twoStreaming(), 'x'), emptyView);
     expect(s.frozen.size).toBe(0);
     expect(s.view).toBe(emptyView);
+  });
+
+  it('releases a freeze only after the classifier could have answered', () => {
+    expect(SAFETY_UNFREEZE_MS).toBe(7000);
+  });
+
+  it('a snapshot drops an unacked pending send it already contains', () => {
+    let s = addPending(twoStreaming(), 'cm-x', 'hello');
+    s = withSnapshot(s, apply(s, user(6, 'u2', 'cm-x', 'hello')).view);
+    expect(s.pendingSends).toHaveLength(0);
+    expect(shownMessages(s).filter((m) => m.text === 'hello')).toHaveLength(1);
+  });
+
+  it('a snapshot keeps freezes on messages that are still streaming', () => {
+    let s = freezeAll(twoStreaming());
+    const next = apply(s, delta(6, 'A', ' more'), delta(7, 'B', ' more'), completed(8, 'A'));
+    s = withSnapshot(s, next.view);
+    expect([...s.frozen.keys()]).toEqual(['B']);
+    expect(shown(s, 'B')).toBe('Theo says');
+    expect(shown(s, 'A')).toBe('Maya says more');
   });
 });
