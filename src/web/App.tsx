@@ -131,7 +131,7 @@ export function App({ conversationId }: { conversationId: string }) {
                 first={!prev || authorKey(prev) !== who}
                 last={!next || authorKey(next) !== who}
                 failed={m.failed}
-                onRetry={m.failed ? () => retry(m.id) : undefined}
+                onRetry={m.failed ? () => retry(m.key) : undefined}
               />
             );
           })}
