@@ -26,7 +26,9 @@ const def = (r: FakeRequest): FakeReply => {
       return { object: { clusters: ids } };
     }
     case 'classify':
-      return { object: {} };
+      return {
+        object: { kind: 'new_message', targets: [], apply: 'continue', scope: 'one_off', standing_text: null, revokes: [] },
+      };
     case 'judge':
       return { object: {} };
   }
