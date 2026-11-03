@@ -99,6 +99,7 @@ async function waves(
           replyTo: replyToFor(s.agentId, hop, lastSpoken, triggerMessageId),
           effort: s.effort,
           gist: s.gist,
+          // speakers is already budget-cut; only a failed start (append error) can leave a stale name here.
           othersReplying: speakers.map((o) => o.agentId).filter((id) => id !== s.agentId),
         });
         started++;
@@ -124,6 +125,7 @@ async function waves(
     forced = hop === BUDGET.maxHops ? [] : nextForced(lastSpoken);
     lastWave = wave.map((w) => w.gen.agentId);
     hop++;
+    // Only when every startGeneration in this wave threw (speakers was non-empty).
     if (wave.length === 0) return;
   }
 }
