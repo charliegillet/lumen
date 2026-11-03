@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { ModelMessage } from 'ai';
-import type { AgentId, Effort } from '../../shared/events.js';
+import type { AgentId, Effort, EventBody } from '../../shared/events.js';
 import type { ConversationActor } from '../actor.js';
 import { buildPrompt, type PromptMode } from '../agents/prompt.js';
 import { streamChat } from '../llm/stream.js';
@@ -30,6 +30,15 @@ interface Segment {
   readonly partial: string;
 }
 
+interface ReopenArgs {
+  messageId: string;
+  agentId: AgentId;
+  hop: number;
+  effort: Effort;
+  segment: number;
+  steers: string[];
+}
+
 export interface StartArgs {
   agentId: AgentId;
   turnId: string;
@@ -56,21 +65,25 @@ export class Generation {
   private terminal = false;
   private resolveDone!: (o: Outcome) => void;
 
-  /** Use startGeneration. Appends message_started and starts segment 0. */
-  constructor(actor: ConversationActor, a: StartArgs) {
+  /**
+   * Use startGeneration or reopenGeneration. A start appends message_started
+   * and runs segment 0; a reopen appends message_segment_started (replace) on
+   * an existing, finished message and streams into the same messageId.
+   */
+  constructor(actor: ConversationActor, init: { start: StartArgs } | { reopen: ReopenArgs }) {
     this.actor = actor;
-    this.messageId = randomUUID();
-    this.agentId = a.agentId;
-    this.hop = a.hop;
-    this.effort = a.effort;
     this.done = new Promise((r) => (this.resolveDone = r));
-
-    // The agent's own message_started is deliberately outside its context.
+    // The agent's own start event is deliberately outside its context.
     const cutoff = actor.lastSeq;
-    this.current = newSegment(0, '');
-    actor.generations.set(this.messageId, this);
-    try {
-      actor.append({
+
+    if ('start' in init) {
+      const a = init.start;
+      this.messageId = randomUUID();
+      this.agentId = a.agentId;
+      this.hop = a.hop;
+      this.effort = a.effort;
+      this.current = newSegment(0, '');
+      this.begin({
         type: 'message_started',
         messageId: this.messageId,
         agentId: a.agentId,
@@ -80,18 +93,44 @@ export class Generation {
         contextCutoffSeq: cutoff,
         effort: a.effort,
       });
+      this.launch(this.current, 'reply', cutoff, {
+        kind: 'reply',
+        gist: a.gist,
+        effort: a.effort,
+        hop: a.hop,
+        othersReplying: a.othersReplying,
+      });
+      return;
+    }
+
+    const r = init.reopen;
+    this.messageId = r.messageId;
+    this.agentId = r.agentId;
+    this.hop = r.hop;
+    this.effort = r.effort;
+    this.segment = r.segment;
+    this.current = newSegment(r.segment, '');
+    this.begin({
+      type: 'message_segment_started',
+      messageId: r.messageId,
+      segment: r.segment,
+      contextCutoffSeq: cutoff,
+      truncateTo: 0,
+      mode: 'replace',
+    });
+    this.launch(this.current, 'replace', cutoff, { kind: 'replace', steers: r.steers, effort: r.effort });
+  }
+
+  /** Registers as live and appends the opening event; a failed append ends the generation. */
+  private begin(body: EventBody): void {
+    this.actor.generations.set(this.messageId, this);
+    try {
+      this.actor.append(body);
     } catch (err) {
       this.terminal = true;
       this.settle('error');
       throw err;
     }
-    this.launch(this.current, 'reply', cutoff, {
-      kind: 'reply',
-      gist: a.gist,
-      effort: a.effort,
-      hop: a.hop,
-      othersReplying: a.othersReplying,
-    });
   }
 
   /** Committed text, as folded into actor.view. */
@@ -355,5 +394,23 @@ export function stripContinuation(partial: string, head: string): string {
 }
 
 export function startGeneration(actor: ConversationActor, a: StartArgs): Generation {
-  return new Generation(actor, a);
+  return new Generation(actor, { start: a });
+}
+
+/**
+ * Rewrite a finished (done or stopped) agent message in place: a new `replace`
+ * segment streams into the same messageId with the steers as the final ask.
+ * Throws if the message is unknown, not an agent's, or still live.
+ */
+export function reopenGeneration(actor: ConversationActor, messageId: string, steers: string[]): Generation {
+  const m = actor.view.messages.find((x) => x.id === messageId);
+  if (!m || m.author.kind !== 'agent') throw new Error(`reopen: no agent message ${messageId}`);
+  if (m.status === 'streaming' || actor.generations.has(messageId)) {
+    throw new Error(`reopen: message ${messageId} is still live`);
+  }
+  const startEv = actor.eventsUpTo(m.startSeq).at(-1);
+  const effort: Effort = startEv?.type === 'message_started' ? startEv.effort : 'low';
+  return new Generation(actor, {
+    reopen: { messageId, agentId: m.author.agentId, hop: m.hop, effort, segment: m.segment + 1, steers },
+  });
 }
