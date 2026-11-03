@@ -46,7 +46,9 @@ function e2e(r: FakeRequest): FakeReply {
   const id = r.agentId ?? 'maya';
   const name = NAMES[id] ?? 'Maya';
   const stream = (head: string): FakeReply => {
-    const chunks = [head, ...Array.from({ length: 39 }, (_, i) => ` ${name.toLowerCase()}${i + 1}`)];
+    // A "long" message in the chat gets 120 chunks so tests can act well before natural completion.
+    const n = r.messages.some((m) => /\blong\b/.test(String(m.content))) ? 119 : 39;
+    const chunks = [head, ...Array.from({ length: n }, (_, i) => ` ${name.toLowerCase()}${i + 1}`)];
     if (r.system.includes('end with ✅')) chunks[chunks.length - 1] += ' ✅';
     return { chunks, delayMs: 40 };
   };
