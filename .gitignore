@@ -5,3 +5,4 @@ data/
 *.db
 playwright-report
 test-results
+evals/runs/
