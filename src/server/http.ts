@@ -1,7 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import { dirname, join, relative, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join, relative, resolve } from 'node:path';
 import { Hono, type Context } from 'hono';
 import { streamSSE } from 'hono/streaming';
 import { serveStatic } from '@hono/node-server/serve-static';
@@ -13,10 +12,9 @@ import type { ConvEvent } from '../shared/events.js';
 const CONV_ID = /^[A-Za-z0-9_-]{1,64}$/;
 const PING_MS = 20_000;
 
-function webRoot(): string {
-  const here = dirname(fileURLToPath(import.meta.url));
-  const built = resolve(here, '../web'); // dist/server -> dist/web
-  return existsSync(built) ? built : resolve(here, '../../dist/web'); // src/server
+/** Built frontend lives in <project root>/dist/web, never next to the sources (src/web is Vite's source root). */
+export function resolveWebRoot(cwd: string = process.cwd()): string {
+  return resolve(cwd, 'dist/web');
 }
 
 type Parsed<T> = { ok: true; value: T } | { ok: false; error: string };
@@ -69,9 +67,9 @@ export function createApp(db: Db): Hono {
 
   app.get('/api/conv/:id/events', (c) => {
     const actor = getActor(db, c.req.param('id'));
-    const raw = c.req.header('Last-Event-ID') ?? c.req.query('after') ?? '0';
-    const n = Number(raw);
-    const after = Number.isInteger(n) && n >= 0 ? n : 0;
+    const raw = c.req.header('Last-Event-ID') || c.req.query('after') || '0';
+    // A stale id beyond the log (e.g. after a DB reset) would dedupe every new event away.
+    const after = Math.min(/^\d+$/.test(raw) ? Number(raw) : 0, actor.lastSeq);
 
     c.header('X-Accel-Buffering', 'no');
     c.header('Cache-Control', 'no-cache');
@@ -92,31 +90,35 @@ export function createApp(db: Db): Hono {
             await stream.writeSSE({ id: String(e.seq), data: JSON.stringify(e) });
           }
         } catch {
-          closed = true;
+          cleanup();
         } finally {
           pumping = false;
         }
       };
 
+      let unsubscribe: () => void = () => {};
+      let ping: ReturnType<typeof setInterval> | undefined;
+      let finish: () => void = () => {};
+      const cleanup = (): void => {
+        closed = true;
+        clearInterval(ping);
+        unsubscribe();
+        finish();
+      };
+
       // Subscribe before replaying so nothing falls between the two.
-      const unsubscribe = actor.subscribe((e) => {
+      unsubscribe = actor.subscribe((e) => {
         queue.push(e);
         void pump();
       });
-      const ping = setInterval(() => {
+      ping = setInterval(() => {
         if (closed) return;
-        void stream.write(': ping\n\n').catch(() => {
-          closed = true;
-        });
+        void stream.write(': ping\n\n').catch(cleanup);
       }, PING_MS);
 
       const done = new Promise<void>((res) => {
-        stream.onAbort(() => {
-          closed = true;
-          clearInterval(ping);
-          unsubscribe();
-          res();
-        });
+        finish = res;
+        stream.onAbort(cleanup);
       });
 
       // Replay is sorted ahead of any live events already buffered.
@@ -124,8 +126,7 @@ export function createApp(db: Db): Hono {
       queue.sort((a, b) => a.seq - b.seq);
       await pump();
       await done;
-      clearInterval(ping);
-      unsubscribe();
+      cleanup();
     });
   });
 
@@ -170,7 +171,7 @@ export function createApp(db: Db): Hono {
 
   app.get('/', (c) => c.redirect(`/c/${randomUUID()}`, 302));
 
-  const root = webRoot();
+  const root = resolveWebRoot();
   app.get('/c/:id', (c) => {
     if (!CONV_ID.test(c.req.param('id'))) return c.text('not found', 404);
     const index = join(root, 'index.html');

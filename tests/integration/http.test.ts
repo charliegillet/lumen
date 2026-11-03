@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { openDb, type Db } from '../../src/server/db.js';
 import { getActor } from '../../src/server/actor.js';
-import { createApp } from '../../src/server/http.js';
+import { resolve } from 'node:path';
+import { createApp, resolveWebRoot } from '../../src/server/http.js';
 import type { Hono } from 'hono';
 
 // HTTP layer only: steering is stubbed (the real stack is covered in http-stack.test.ts).
@@ -208,6 +209,26 @@ describe('commands', () => {
 });
 
 describe('routing', () => {
+  it('web root is <cwd>/dist/web, never src/web', () => {
+    expect(resolveWebRoot('/proj')).toBe('/proj/dist/web');
+    expect(resolveWebRoot()).toBe(resolve(process.cwd(), 'dist/web'));
+  });
+
+  it('empty Last-Event-ID falls back to ?after; junk and stale ids are tolerated', async () => {
+    const actor = getActor(db, 'c1');
+    for (let i = 0; i < 3; i++) actor.append({ type: 'user_message', messageId: `m${i}`, clientMsgId: `x${i}`, text: 't' });
+    let rd = reader(await app.request('/api/conv/c1/events?after=2', { headers: { 'Last-Event-ID': '' } }));
+    expect(await seqs(rd, 1)).toEqual([3]);
+    await rd.cancel();
+    rd = reader(await app.request('/api/conv/c1/events?after=1.5x'));
+    expect(await seqs(rd, 1)).toEqual([1]);
+    await rd.cancel();
+    rd = reader(await app.request('/api/conv/c1/events', { headers: { 'Last-Event-ID': '999' } }));
+    actor.append({ type: 'user_message', messageId: 'm9', clientMsgId: 'x9', text: 't' });
+    expect(await seqs(rd, 1)).toEqual([4]);
+    await rd.cancel();
+  });
+
   it('rejects bad conversation ids', async () => {
     expect((await app.request('/api/conv/bad.id/snapshot')).status).toBe(404);
     expect((await app.request(`/api/conv/${'a'.repeat(65)}/snapshot`)).status).toBe(404);
