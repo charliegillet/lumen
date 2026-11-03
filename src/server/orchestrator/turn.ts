@@ -72,11 +72,12 @@ async function waves(
     const clusters = await clusterGists(bids, signal); // swallows AbortError
     if (signal.aborted || !inTime()) return;
 
-    const speakers = selectSpeakers(bids, clusters, {
+    const selected = selectSpeakers(bids, clusters, {
       forced: forcedNow,
       hop,
       excluded: hop > 0 ? lastWave : [],
-    }).slice(0, BUDGET.maxAgentMessages - started);
+    });
+    const speakers = cutToBudget(selected, forcedNow, BUDGET.maxAgentMessages - started);
     if (speakers.length === 0) return;
 
     const wave: { gen: Generation; addresses: Bid['addresses'] }[] = [];
@@ -116,6 +117,14 @@ async function waves(
     hop++;
     if (wave.length === 0) return;
   }
+}
+
+/** Keep at most `room` speakers, forced ones first; launch order stays AGENT_IDS order. */
+function cutToBudget<T extends { agentId: AgentId }>(speakers: T[], forced: AgentId[], room: number): T[] {
+  if (speakers.length <= room) return speakers;
+  const isForced = (s: T) => forced.includes(s.agentId);
+  const kept = new Set([...speakers.filter(isForced), ...speakers.filter((s) => !isForced(s))].slice(0, room));
+  return speakers.filter((s) => kept.has(s));
 }
 
 /** Agents a wave's completed messages @mention or address, minus each speaker itself. */

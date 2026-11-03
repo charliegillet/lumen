@@ -207,6 +207,29 @@ describe('runTurn', () => {
       for (let i = 1; i < s.length; i++) expect(s[i]!.replyTo).toBe(s[i - 1]!.messageId);
     });
 
+    it('budget cut keeps forced agents before unforced ones', async () => {
+      const saved = BUDGET.maxAgentMessages;
+      BUDGET.maxAgentMessages = 2; // one slot left after wave 0
+      try {
+        script({
+          gate: (id, n) =>
+            id === 'theo' && n === 0
+              ? { should_respond: true, novelty: 3, gist: 'ask Priya' }
+              : id === 'maya' && n === 1
+                ? { should_respond: true, novelty: 3, gist: 'big new point' }
+                : QUIET,
+          reply: (id) => ({ chunks: [id === 'theo' ? '@Priya your view?' : 'Noted.'], delayMs: 5 }),
+        });
+        await runTurn(actor, { triggerMessageId: 'u1', forced: [] });
+        expect(started().map((e) => [e.agentId, e.hop])).toEqual([
+          ['theo', 0],
+          ['priya', 1],
+        ]);
+      } finally {
+        BUDGET.maxAgentMessages = saved;
+      }
+    });
+
     it('timeout launches no new wave', async () => {
       const saved = BUDGET.turnTimeoutMs;
       BUDGET.turnTimeoutMs = 60;
