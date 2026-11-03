@@ -1,9 +1,11 @@
 import { randomUUID } from 'node:crypto';
+import { z } from 'zod';
 import type { AgentId } from '../../shared/events.js';
 import type { MessageView } from '../../shared/reducer.js';
 import { parseTargets } from '../../shared/targets.js';
 import type { ConversationActor } from '../actor.js';
 import { AGENT_IDS } from '../agents/personas.js';
+import { generateStructured } from '../llm/stream.js';
 import { reopenGeneration, type Generation } from '../orchestrator/generation.js';
 import { runTurn } from '../orchestrator/turn.js';
 import { classifySteer, type SteerDecision } from './classify.js';
@@ -12,8 +14,9 @@ import { classifySteer, type SteerDecision } from './classify.js';
 export const REWRITE_WINDOW_MS = 2000;
 /** Finished messages the classifier is shown as context. */
 export const RECENT_MS = 10_000;
-/** Cap on the classifier call; on timeout it falls back like a failure. */
+/** Caps on the classifier and judge calls; on timeout each falls back like a failure. */
 export const CLASSIFY_TIMEOUT_MS = 6000;
+export const JUDGE_TIMEOUT_MS = 8000;
 
 export interface SendInput {
   clientMsgId: string;
@@ -23,13 +26,15 @@ export interface SendInput {
   rendered: Record<string, number>;
 }
 
-/** Steers applied to a generation's current segment, for debouncing. */
+/** Steers applied to a generation's current segment, for debouncing and the judge. */
 interface Pending {
   segment: number;
   mode: 'continue' | 'replace';
   steers: string[];
 }
 const pending = new WeakMap<Generation, Pending>();
+/** One compliance check per generation, shared by every steer that hit it. */
+const judged = new WeakMap<Generation, Promise<void>>();
 /** Bumped by every stop_all; work queued before a stop must not start after it. */
 const stopEpochs = new WeakMap<ConversationActor, number>();
 const stopEpoch = (a: ConversationActor) => stopEpochs.get(a) ?? 0;
@@ -135,7 +140,7 @@ async function handle(actor: ConversationActor, userMessageId: string, i: SendIn
           const g = steerAgent(actor, id, d.apply, i);
           if (g) {
             targets.push(id);
-            waits.push(g.done);
+            waits.push(judgeWhenDone(actor, g));
           } else forced.push(id);
         }
         if (forced.length > 0) {
@@ -238,6 +243,61 @@ function restartLive(g: Generation, apply: 'continue' | 'replace', i: SendInput)
   if (!g.restart(mode, keep, steers)) return false;
   pending.set(g, { segment: g.segment, mode, steers });
   return true;
+}
+
+// ---------------------------------------------------------------------------
+// Compliance retry
+
+const JudgeSchema = z.object({ complies: z.boolean() });
+const JUDGE_SYSTEM = `You check whether a reply in a group chat follows what the person asked for.
+Answer complies=false only when the reply clearly ignores or contradicts the request (wrong language, far too long after asking for brevity, missing the asked-for point). When unsure, answer complies=true.
+Respond with the JSON object only.`;
+
+function judgeWhenDone(actor: ConversationActor, g: Generation): Promise<void> {
+  let w = judged.get(g);
+  if (!w) {
+    w = judgeAndRetry(actor, g).catch((err: unknown) => {
+      console.warn(`generation ${g.messageId}: compliance check failed`, err);
+    });
+    judged.set(g, w);
+  }
+  return w;
+}
+
+/** After a steered message completes, ask the judge; redo it once (replace) if it ignored the steer. */
+async function judgeAndRetry(actor: ConversationActor, g: Generation): Promise<void> {
+  if ((await g.done) !== 'completed') return;
+  const p = pending.get(g);
+  const m = byId(actor, g.messageId);
+  if (!p || !m || m.status !== 'done' || m.segment !== p.segment) return;
+  const epoch = stopEpoch(actor);
+  const seqAtDone = actor.lastSeq;
+
+  if (await complies(p.steers, m.text)) return;
+
+  // Skip the redo if anything moved on meanwhile: a stop, a new human
+  // message, or the message itself being reopened.
+  const now = byId(actor, g.messageId);
+  const newer = actor.view.messages.some((x) => x.author.kind === 'user' && x.startSeq > seqAtDone);
+  if (stopEpoch(actor) !== epoch || newer || !now || now.status !== 'done' || now.segment !== p.segment) return;
+  if (actor.generations.has(g.messageId)) return;
+  await reopenGeneration(actor, g.messageId, p.steers).done; // final, not judged again
+}
+
+async function complies(steers: string[], text: string): Promise<boolean> {
+  try {
+    const r = await generateStructured({
+      role: 'classifier',
+      system: JUDGE_SYSTEM,
+      prompt: `The person asked: «${steers.join(' / ')}»\n\nThe reply:\n${text}`,
+      schema: JudgeSchema,
+      signal: AbortSignal.timeout(JUDGE_TIMEOUT_MS),
+      meta: { kind: 'judge' },
+    });
+    return JudgeSchema.parse(r).complies;
+  } catch {
+    return true; // a failed judge never blocks or redoes an answer
+  }
 }
 
 // ---------------------------------------------------------------------------
