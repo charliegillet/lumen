@@ -36,12 +36,16 @@ export class Chat {
   }
 
   /** Sends without waiting for the agents. */
-  async send(text: string, rendered: Record<string, number> = {}): Promise<number> {
+  async send(
+    text: string,
+    rendered: Record<string, number> = {},
+    typingStartedAt: number | null = null,
+  ): Promise<number> {
     if (this.overDeadline()) return this.actor.lastSeq;
     const { seq, settled } = await handleUserMessage(this.actor, {
       clientMsgId: randomUUID(),
       text,
-      typingStartedAt: null,
+      typingStartedAt,
       rendered,
     });
     this.settles.push(settled);

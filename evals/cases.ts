@@ -122,7 +122,8 @@ const steerCompliance: Case = {
       c.messages.find((m) => agentOf(m) === 'priya' && m.status === 'streaming' && m.text.length >= 40),
     );
     const shown = target.text.length;
-    await c.send('@Priya one sentence', { [target.id]: shown });
+    // As the client does: the person started typing while the message was still streaming.
+    await c.send('@Priya one sentence', { [target.id]: shown }, Date.now());
     await c.quiet();
     const final = c.messages.find((m) => m.id === target.id);
     if (!final || final.text.trim() === '') return { pass: false, note: 'steered message empty', failure: 'steered message empty' };
