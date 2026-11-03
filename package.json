@@ -19,6 +19,8 @@
   "type": "module",
   "private": true,
   "dependencies": {
+    "@ai-sdk/anthropic": "^4.0.96",
+    "@ai-sdk/google": "^4.0.111",
     "@ai-sdk/openai": "^4.0.108",
     "@ai-sdk/openai-compatible": "^3.0.84",
     "@hono/node-server": "^2.1.6",
