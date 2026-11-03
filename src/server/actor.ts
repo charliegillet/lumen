@@ -26,6 +26,7 @@ export class ConversationActor {
   private readonly afterStmt;
   private readonly upToStmt;
   private readonly findUserStmt;
+  private readonly findStopStmt;
 
   constructor(db: Db, id: string) {
     this.db = db;
@@ -41,6 +42,10 @@ export class ConversationActor {
     );
     this.findUserStmt = db.prepare(
       "SELECT seq, body, at FROM events WHERE conversation_id = ? AND type = 'user_message' AND json_extract(body,'$.clientMsgId') = ?",
+    );
+
+    this.findStopStmt = db.prepare(
+      "SELECT seq, body, at FROM events WHERE conversation_id = ? AND type = 'stop_all' AND json_extract(body,'$.clientReqId') = ?",
     );
 
     const existing = this.eventsAfter(0);
@@ -104,6 +109,11 @@ export class ConversationActor {
 
   findUserMessage(clientMsgId: string): ConvEvent | undefined {
     const row = this.findUserStmt.get(this.id, clientMsgId) as Row | undefined;
+    return row ? this.toEvent(row) : undefined;
+  }
+
+  findStopAll(clientReqId: string): ConvEvent | undefined {
+    const row = this.findStopStmt.get(this.id, clientReqId) as Row | undefined;
     return row ? this.toEvent(row) : undefined;
   }
 
