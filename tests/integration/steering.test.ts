@@ -7,6 +7,30 @@ import { handleStop, handleUserMessage, type SendInput } from '../../src/server/
 import type { SteerDecision } from '../../src/server/steering/classify.js';
 import type { AgentId, ConvEvent } from '../../src/shared/events.js';
 
+// Lets a test hold chosen structured calls (gate, classify, judge): `before`
+// may return a promise the call waits on first (a delay, or a hang until abort).
+type Meta = { kind: string; agentId?: string };
+const hooks = vi.hoisted(() => ({
+  before: null as null | ((meta: Meta, signal?: AbortSignal) => Promise<void> | undefined),
+}));
+vi.mock('../../src/server/llm/stream.js', async (importOriginal) => {
+  const m = await importOriginal<typeof import('../../src/server/llm/stream.js')>();
+  return {
+    ...m,
+    generateStructured: (async (a: Parameters<typeof m.generateStructured>[0]) => {
+      const wait = hooks.before?.(a.meta, a.signal);
+      if (wait) await wait;
+      return m.generateStructured(a);
+    }) as typeof m.generateStructured,
+  };
+});
+const hangUntilAbort = (signal?: AbortSignal) =>
+  new Promise<never>((_, reject) => {
+    const fail = () => reject(Object.assign(new Error('The operation was aborted'), { name: 'AbortError' }));
+    if (signal?.aborted) fail();
+    else signal?.addEventListener('abort', fail, { once: true });
+  });
+
 const UNSTEERED = (id: string) => Array.from({ length: 10 }, (_, i) => `${id}${i} `);
 const STEERED = ['STEERED: ', 'short', ' answer.'];
 const unsteeredText = (id: string) => UNSTEERED(id).join('');
@@ -71,6 +95,7 @@ beforeEach(() => {
   process.env.MODEL_GATE = 'fake:x';
   process.env.MODEL_CLASSIFIER = 'fake:x';
   resetFake();
+  hooks.before = null;
   judgeCalls = 0;
   s = {
     classify: () => NEW_MESSAGE,
@@ -88,6 +113,7 @@ afterEach(async () => {
   delete process.env.MODEL_GATE;
   delete process.env.MODEL_CLASSIFIER;
   resetFake();
+  hooks.before = null;
   db.close();
   vi.restoreAllMocks();
 });
@@ -250,6 +276,71 @@ describe('handleUserMessage: steering', () => {
     expect(segmentsFor(g.theo.messageId)).toHaveLength(2);
   });
 
+  it('"Theo wait, focus on pricing" redirects Theo instead of stopping him', async () => {
+    const g = startAll();
+    await waitFor(() => g.theo.textSoFar().length > 0);
+    s.classify = () => steer(['theo']);
+    await (await send('Theo wait, focus on pricing')).settled;
+    await idle();
+
+    expect(events().some((e) => e.type === 'stop_all' || e.type === 'message_aborted')).toBe(false);
+    expect(segmentsFor(g.theo.messageId)).toHaveLength(1);
+    expect(steerRequests('theo')[0]?.prompt).toContain('«Theo wait, focus on pricing»');
+    expect(msg(g.theo.messageId)?.text).toContain('STEERED:');
+    for (const id of ['maya', 'priya'] as const) {
+      expect(segmentsFor(g[id].messageId)).toHaveLength(0);
+      expect(msg(g[id].messageId)?.text).toBe(unsteeredText(id));
+    }
+    expect(resolved().at(-1)).toMatchObject({ targets: ['theo'] });
+  });
+
+  it('"wait, what about pricing?" while streaming is classified, not a stop', async () => {
+    const g = startAll();
+    await waitFor(() => Object.values(g).every((x) => x.textSoFar().length > 0));
+    s.classify = () => NEW_MESSAGE;
+    await (await send('wait, what about pricing?')).settled;
+    await idle();
+
+    expect(fakeRequests.some((r) => r.kind === 'classify' && r.prompt?.includes('wait, what about pricing?'))).toBe(true);
+    expect(events().some((e) => e.type === 'stop_all' || e.type === 'message_aborted')).toBe(false);
+    for (const id of ['maya', 'theo', 'priya'] as const) {
+      expect(msg(g[id].messageId)?.text).toBe(unsteeredText(id));
+      expect(msg(g[id].messageId)?.status).toBe('done');
+    }
+    expect(resolved().at(-1)).toMatchObject({ targets: [] });
+  });
+
+  it('a merged steer keeps the first steer\'s truncate point', async () => {
+    const g = startAll();
+    await waitFor(() => g.theo.textSoFar().length >= 6);
+    const shownText = g.theo.textSoFar().slice(0, 4);
+    s.classify = () => steer(['theo']);
+    const a = await send('@Theo shorter', { rendered: { [g.theo.messageId]: 4 } });
+    // A stale client count from before the first restart must not cut further.
+    const b = await send('@Theo mention pricing', { rendered: { [g.theo.messageId]: 1 } });
+    await Promise.all([a.settled, b.settled]);
+    const segs = segmentsFor(g.theo.messageId);
+    expect(segs).toHaveLength(2);
+    expect(segs.map((e) => (e.type === 'message_segment_started' ? e.truncateTo : -1))).toEqual([4, 4]);
+    expect(msg(g.theo.messageId)?.text).toBe(shownText + STEERED.join(''));
+  });
+
+  it('an agent that gated in during classification is not forced again', async () => {
+    let releaseClassify!: () => void;
+    hooks.before = (meta) =>
+      meta.kind === 'classify' ? new Promise<void>((r) => (releaseClassify = r)) : undefined;
+    const r = await send('Maya, thoughts?');
+    await waitFor(() => releaseClassify !== undefined);
+    // A running turn's gate let Maya in after the message was sent.
+    const maya = start('maya');
+    releaseClassify();
+    await r.settled;
+    await maya.done;
+    await idle();
+    expect(startedBy('maya')).toHaveLength(1);
+    expect(resolved().at(-1)).toMatchObject({ targets: [] });
+  });
+
   it('idempotent send', async () => {
     const a = await send('hello', { clientMsgId: 'dup' });
     const b = await send('hello', { clientMsgId: 'dup' });
@@ -371,6 +462,36 @@ describe('compliance retry', () => {
     expect(judge?.prompt).toContain('one sentence');
   });
 
+  it('no redo while a later human message is still undecided', async () => {
+    s.judge = () => ({ object: { complies: false } });
+    let judgeStarted = false;
+    let releaseJudge!: () => void;
+    let releaseClassify: (() => void) | null = null;
+    let slowClassify = false;
+    hooks.before = (meta) => {
+      if (meta.kind === 'judge') {
+        judgeStarted = true;
+        return new Promise<void>((r) => (releaseJudge = r));
+      }
+      if (meta.kind === 'classify' && slowClassify) return new Promise<void>((r) => (releaseClassify = r));
+      return undefined;
+    };
+    const theo = start('theo');
+    await waitFor(() => theo.textSoFar().length > 0);
+    s.classify = () => steer(['theo']);
+    const a = await send('@Theo one sentence');
+    await waitFor(() => judgeStarted);
+    slowClassify = true;
+    s.classify = () => NEW_MESSAGE;
+    const b = await send('@Theo also add numbers');
+    await waitFor(() => releaseClassify !== null);
+    releaseJudge();
+    await a.settled;
+    expect(segmentsFor(theo.messageId)).toHaveLength(1); // no redo
+    releaseClassify!();
+    await b.settled;
+  });
+
   it('a failing judge counts as compliant', async () => {
     s.judge = () => ({ error: 'judge down' });
     const theo = start('theo');
@@ -421,6 +542,40 @@ describe('stop', () => {
     expect(ctrl?.signal.aborted).toBe(true);
     await r.settled;
     expect(actor.view.messages.filter((m) => m.author.kind === 'agent').every((m) => m.status === 'stopped')).toBe(true);
+  });
+
+  it('stop during the gate phase: nobody starts', async () => {
+    let gating = 0;
+    hooks.before = (meta, signal) => {
+      if (meta.kind !== 'gate') return undefined;
+      gating++;
+      return hangUntilAbort(signal);
+    };
+    const r = await send('What should we do?');
+    await waitFor(() => gating === 3);
+    expect(actor.generations.size).toBe(0);
+    const ctrl = actor.turnAbort;
+    const st = handleStop(actor, { clientReqId: 'stop-g', rendered: {} });
+    expect(st.seq).not.toBeNull();
+    expect(events().find((e) => e.seq === st.seq)?.type).toBe('stop_all');
+    expect(ctrl?.signal.aborted).toBe(true);
+    await r.settled;
+    await sleep(100);
+    expect(events().some((e) => e.type === 'message_started')).toBe(false);
+    // Nothing live and no turn: nothing to stop.
+    expect(handleStop(actor, { clientReqId: 'stop-g2', rendered: {} })).toEqual({ seq: null });
+  });
+
+  it('a targeted stop cancels a queued forced reply', async () => {
+    const theo = start('theo');
+    await waitFor(() => theo.textSoFar().length > 0);
+    const a = await send('Theo, good point'); // waits for Theo, then would force him
+    await waitFor(() => resolved().length === 1);
+    const b = await send('@Theo stop');
+    await Promise.all([a.settled, b.settled]);
+    await sleep(100);
+    expect(msg(theo.messageId)?.status).toBe('stopped');
+    expect(startedBy('theo')).toHaveLength(1);
   });
 
   it('a "stop" message stops everyone and resolves', async () => {
