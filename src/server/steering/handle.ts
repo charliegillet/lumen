@@ -57,6 +57,13 @@ function stops(a: ConversationActor): Stops {
 const stoppedAllSince = (a: ConversationActor, seq: number) => stops(a).all > seq;
 const stoppedSince = (a: ConversationActor, id: AgentId, seq: number) =>
   stoppedAllSince(a, seq) || (stops(a).agent.get(id) ?? 0) > seq;
+/** User messages still waiting for their steer_resolved: messageId -> seq. */
+const unresolvedOf = new WeakMap<ConversationActor, Map<string, number>>();
+function unresolved(a: ConversationActor): Map<string, number> {
+  let m = unresolvedOf.get(a);
+  if (!m) unresolvedOf.set(a, (m = new Map()));
+  return m;
+}
 
 /**
  * Records the human's message, then (asynchronously, in `settled`) decides
@@ -72,6 +79,7 @@ export async function handleUserMessage(
   if (dup) return { seq: dup.seq, settled: Promise.resolve() };
   const messageId = randomUUID();
   const ev = actor.append({ type: 'user_message', messageId, clientMsgId: i.clientMsgId, text: i.text });
+  unresolved(actor).set(messageId, ev.seq);
   const settled = handle(actor, messageId, ev.seq, i).catch((err: unknown) => {
     console.warn(`conversation ${actor.id}: handling message ${messageId} failed`, err);
   });
@@ -194,6 +202,7 @@ async function handle(actor: ConversationActor, userMessageId: string, userSeq: 
   try {
     await decide();
   } finally {
+    unresolved(actor).delete(userMessageId);
     actor.append({ type: 'steer_resolved', userMessageId, targets });
   }
 
@@ -299,15 +308,16 @@ async function judgeAndRetry(actor: ConversationActor, g: Generation): Promise<v
   const p = pending.get(g);
   const m = byId(actor, g.messageId);
   if (!p || !m || m.status !== 'done' || m.segment !== p.segment) return;
-  const seqAtDone = actor.lastSeq;
-
   if (await complies(p.steers, m.text)) return;
 
   // Skip the redo if anything moved on meanwhile: the agent was stopped, a
-  // new human message, or the message itself being reopened.
+  // human message sent after the segment started is still undecided (it may
+  // steer this very message), the agent has a newer message, or this one was
+  // reopened.
   const now = byId(actor, g.messageId);
-  const newer = actor.view.messages.some((x) => x.author.kind === 'user' && x.startSeq > seqAtDone);
-  if (stoppedSince(actor, g.agentId, p.startSeq) || newer) return;
+  const undecided = [...unresolved(actor).values()].some((seq) => seq > p.startSeq);
+  if (stoppedSince(actor, g.agentId, p.startSeq) || undecided) return;
+  if (latestBy(actor, g.agentId)?.id !== g.messageId) return;
   if (!now || now.status !== 'done' || now.segment !== p.segment || actor.generations.has(g.messageId)) return;
   await reopenGeneration(actor, g.messageId, p.steers).done; // final, not judged again
 }
