@@ -14,6 +14,10 @@ describe('parseTargets', () => {
     ['@Maya @Theo be brief', ['maya', 'theo'], false, false],
     ['Many people disagree', [], false, false],
     ['hey y\'all', [], true, false],
+    ['May I ask a question?', [], false, false],
+    ["Prima facie it's fine", [], false, false],
+    ['Theo? you there', ['theo'], false, false],
+    ['Maya. Shorter.', ['maya'], false, false],
     ['@Maya hold on', ['maya'], false, true],
   ])('%s', (text, targets, broadcast, stop) => {
     expect(parseTargets(text)).toEqual({ targets, broadcast, stop });

@@ -19,7 +19,7 @@ const BROADCAST_ANY = new RegExp(`(?<![\\w'])(?:${BROADCAST_SRC})(?![\\w'])`, 'i
 const BROADCAST_LEAD = new RegExp(`^(?:${BROADCAST_SRC})(?![\\w'])`, 'i');
 const STOP_RE = /^(stop|wait|hold on|enough|shh|quiet)\b/i;
 // Ordinary words that sit within edit distance 1 of a name.
-const NOT_NAMES = new Set(['many', 'then', 'they', 'them', 'thee', 'mayo', 'maybe', 'the']);
+const NOT_NAMES = new Set(['many', 'then', 'they', 'them', 'thee', 'mayo', 'the', 'prima', 'mays', 'thea', 'mama']);
 
 /** Optimal string alignment distance (insert/delete/substitute/adjacent swap). */
 function osa(a: string, b: string): number {
@@ -43,13 +43,13 @@ function matchName(token: string): TargetAgentId | undefined {
   const t = token.toLowerCase();
   const exact = IDS.find((id) => id === t);
   if (exact) return exact;
-  if (NOT_NAMES.has(t)) return undefined;
+  if (t.length < 4 || NOT_NAMES.has(t)) return undefined;
   return IDS.find((id) => id.length >= 4 && osa(t, id) <= 1);
 }
 
 /** Leading name (exact or fuzzy) followed by , : ! whitespace or end. Not an apostrophe. */
 function leadingName(s: string): { id: TargetAgentId; rest: string } | undefined {
-  const m = /^([A-Za-z]+)(?=[,:!\s]|$)/.exec(s);
+  const m = /^([A-Za-z]+)(?=[,:!.?\s]|$)/.exec(s);
   if (!m) return undefined;
   const id = matchName(m[1]!);
   return id ? { id, rest: s.slice(m[0].length) } : undefined;
@@ -74,7 +74,7 @@ export function parseTargets(text: string): RegexTargets {
     const b = BROADCAST_LEAD.exec(rest);
     if (b) rest = rest.slice(b[0].length);
   }
-  rest = rest.replace(/^[\s,:!]+/, '');
+  rest = rest.replace(/^[\s,:!.?]+/, '');
 
   const trimmed = text.trim();
   const stop = STOP_RE.test(rest) || /^stop everything$/i.test(trimmed);
