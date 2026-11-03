@@ -14,12 +14,17 @@ const def = (r: FakeRequest): FakeReply => {
       const words = `Hi, this is ${name} with a short answer.`.split(' ');
       return { chunks: words.map((w, i) => (i ? ' ' + w : w)), delayMs: 20 };
     }
-    case 'gate':
+    case 'gate': {
+      const name = r.agentId ?? 'agent';
       return {
-        object: { should_respond: true, novelty: 1, gist: 'a short reply', addresses: [], effort: 'low' },
+        object: { should_respond: true, novelty: 1, gist: `${name} point`, addresses: ['user'], effort: 'low' },
       };
-    case 'dedup':
-      return { object: { duplicate: false } };
+    }
+    case 'dedup': {
+      // Each agent in its own cluster: parse the `agentId: gist` lines.
+      const ids = [...(r.prompt ?? '').matchAll(/^(maya|theo|priya): /gm)].map((m) => [m[1]!]);
+      return { object: { clusters: ids } };
+    }
     case 'classify':
       return { object: {} };
     case 'judge':
