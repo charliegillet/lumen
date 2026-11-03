@@ -3,7 +3,7 @@ import { openDb, type Db } from '../../src/server/db.js';
 import { ConversationActor } from '../../src/server/actor.js';
 import { fakeRequests, resetFake, setFakeScript, type FakeReply } from '../../src/server/llm/fake.js';
 import { startGeneration, type Generation } from '../../src/server/orchestrator/generation.js';
-import { handleUserMessage, type SendInput } from '../../src/server/steering/handle.js';
+import { handleStop, handleUserMessage, type SendInput } from '../../src/server/steering/handle.js';
 import type { SteerDecision } from '../../src/server/steering/classify.js';
 import type { AgentId, ConvEvent } from '../../src/shared/events.js';
 
@@ -385,5 +385,131 @@ describe('compliance retry', () => {
     const g = startAll();
     await Promise.all(Object.values(g).map((x) => x.done));
     expect(fakeRequests.some((r) => r.kind === 'judge')).toBe(false);
+  });
+});
+
+describe('stop', () => {
+  it('stop everything', async () => {
+    const g = startAll();
+    await waitFor(() => Object.values(g).every((x) => x.textSoFar().length >= 4));
+    const rendered: Record<string, number> = {};
+    for (const x of Object.values(g)) rendered[x.messageId] = x.textSoFar().length - 2;
+
+    const r = handleStop(actor, { clientReqId: 'stop-1', rendered });
+    expect(r.seq).not.toBeNull();
+    expect(events().find((e) => e.seq === r.seq)?.type).toBe('stop_all');
+    await sleep(200);
+
+    expect(events().some((e) => e.seq > r.seq! && e.type === 'token_delta')).toBe(false);
+    for (const x of Object.values(g)) {
+      expect(msg(x.messageId)?.status).toBe('stopped');
+      expect(msg(x.messageId)?.text.length).toBe(rendered[x.messageId]);
+      expect(await x.done).toBe('stopped');
+    }
+    expect(handleStop(actor, { clientReqId: 'stop-1', rendered: {} })).toEqual({ seq: r.seq });
+    expect(handleStop(actor, { clientReqId: 'stop-2', rendered: {} })).toEqual({ seq: null });
+    expect(events().filter((e) => e.type === 'stop_all')).toHaveLength(1);
+  });
+
+  it('stop aborts the running turn', async () => {
+    s.gate = (_id, prompt) => prompt.includes('0 replies deep');
+    const r = await send('What should we do?');
+    await waitFor(() => actor.generations.size === 3);
+    const ctrl = actor.turnAbort;
+    expect(ctrl).not.toBeNull();
+    handleStop(actor, { clientReqId: 'stop-t', rendered: renderedNow() });
+    expect(ctrl?.signal.aborted).toBe(true);
+    await r.settled;
+    expect(actor.view.messages.filter((m) => m.author.kind === 'agent').every((m) => m.status === 'stopped')).toBe(true);
+  });
+
+  it('a "stop" message stops everyone and resolves', async () => {
+    const g = startAll();
+    await waitFor(() => Object.values(g).every((x) => x.textSoFar().length > 0));
+    await (await send('stop')).settled;
+    expect(events().filter((e) => e.type === 'stop_all')).toHaveLength(1);
+    for (const x of Object.values(g)) expect(msg(x.messageId)?.status).toBe('stopped');
+    expect([...(resolved().at(-1)?.targets ?? [])].sort()).toEqual(['maya', 'priya', 'theo']);
+    expect(fakeRequests.some((r) => r.kind === 'classify')).toBe(false);
+  });
+
+  it('"@Theo stop" stops only Theo', async () => {
+    const g = startAll();
+    await waitFor(() => g.theo.textSoFar().length > 0);
+    await (await send('@Theo stop')).settled;
+    expect(msg(g.theo.messageId)?.status).toBe('stopped');
+    await idle();
+    expect(msg(g.maya.messageId)?.text).toBe(unsteeredText('maya'));
+    expect(msg(g.priya.messageId)?.status).toBe('done');
+    expect(events().some((e) => e.type === 'stop_all')).toBe(false);
+    expect(resolved().at(-1)).toMatchObject({ targets: ['theo'] });
+  });
+
+  it('a pending reply does not start after a stop', async () => {
+    const theo = start('theo');
+    await waitFor(() => theo.textSoFar().length > 0);
+    const r = await send('Theo, good point'); // new_message: waits for Theo, then replies
+    await waitFor(() => resolved().length === 1);
+    handleStop(actor, { clientReqId: 'stop-p', rendered: renderedNow() });
+    await r.settled;
+    expect(startedBy('theo')).toHaveLength(1);
+  });
+});
+
+describe('standing instructions', () => {
+  it('standing instruction persists', async () => {
+    s.classify = (text) =>
+      text.includes('French')
+        ? { ...NEW_MESSAGE, scope: 'standing', standing_text: 'Answer in French.' }
+        : NEW_MESSAGE;
+    s.gate = (_id, prompt) => prompt.includes('0 replies deep');
+    await (await send('from now on, everyone answer in French')).settled;
+
+    const set = events().find((e) => e.type === 'instruction_set');
+    expect(set).toMatchObject({ scope: 'all', text: 'Answer in French.' });
+    const replies = () => fakeRequests.filter((r) => r.kind === 'reply');
+    expect(new Set(replies().map((r) => r.agentId))).toEqual(new Set(['maya', 'theo', 'priya']));
+    expect(replies().every((r) => r.system.includes('Answer in French.'))).toBe(true);
+
+    const before = replies().length;
+    await (await send('And what about hiring?')).settled;
+    const later = replies().slice(before);
+    expect(new Set(later.map((r) => r.agentId))).toEqual(new Set(['maya', 'theo', 'priya']));
+    expect(later.every((r) => r.system.includes('Answer in French.'))).toBe(true);
+
+    // Survives reload: a fresh actor over the same DB.
+    const fresh = new ConversationActor(db, 'c1');
+    expect(fresh.view.instructions).toEqual([expect.objectContaining({ scope: 'all', text: 'Answer in French.' })]);
+    const g = startGeneration(fresh, {
+      agentId: 'priya',
+      turnId: 't9',
+      hop: 0,
+      replyTo: 'u1',
+      effort: 'low',
+      gist: 'x',
+      othersReplying: [],
+    });
+    await g.done;
+    expect(fakeRequests.at(-1)?.system).toContain('Answer in French.');
+  });
+
+  it('standing steer at one agent is scoped to that agent and applies now', async () => {
+    const theo = start('theo');
+    await waitFor(() => theo.textSoFar().length > 0);
+    s.classify = () => ({ ...steer(['theo']), scope: 'standing', standing_text: 'Keep it to one sentence.' });
+    await (await send('@Theo always keep it to one sentence')).settled;
+    expect(events().find((e) => e.type === 'instruction_set')).toMatchObject({
+      scope: 'theo',
+      text: 'Keep it to one sentence.',
+    });
+    expect(steerRequests('theo')[0]?.system).toContain('Keep it to one sentence.');
+    expect(msg(theo.messageId)?.text).toContain('STEERED:');
+  });
+
+  it('revokes remove an instruction', async () => {
+    actor.append({ type: 'instruction_set', instructionId: 'i1', scope: 'all', text: 'Answer in French.' });
+    s.classify = () => ({ ...NEW_MESSAGE, scope: 'standing', standing_text: 'Answer in English.', revokes: ['i1'] });
+    await (await send('from now on, English please')).settled;
+    expect(actor.view.instructions.map((i) => i.text)).toEqual(['Answer in English.']);
   });
 });
