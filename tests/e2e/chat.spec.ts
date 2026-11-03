@@ -18,6 +18,8 @@ const texts = (page: Page) => page.locator(BUBBLES).allInnerTexts();
 const stopBtn = (page: Page) => page.getByRole('button', { name: 'Stop' });
 const bubbleOf = (page: Page, id: string) => page.locator(`.row-agent[data-agent="${id}"] ${BUBBLES}`);
 
+const LONG = 'what should we do about pricing? give a long answer';
+
 async function allStreaming(page: Page) {
   await expect.poll(async () => (await texts(page)).filter((t) => t.length > 0).length).toBe(3);
 }
@@ -28,6 +30,15 @@ async function grewBetween(page: Page, gapMs = 400): Promise<number> {
   await page.waitForTimeout(gapMs);
   const b = await texts(page);
   return b.filter((t, i) => t.length > (a[i]?.length ?? 0)).length;
+}
+
+/** Whether every listed agent's bubble grew between two samples. */
+async function allGrew(page: Page, ids: string[], gapMs = 400): Promise<boolean[]> {
+  const len = async () => Promise.all(ids.map(async (id) => (await bubbleOf(page, id).innerText()).length));
+  const a = await len();
+  await page.waitForTimeout(gapMs);
+  const b = await len();
+  return b.map((x, i) => x > a[i]!);
 }
 
 async function expectNoMechanismWords(page: Page) {
@@ -46,29 +57,32 @@ test('three agents stream concurrently', async ({ page }) => {
 
 test('steer by name mid-stream', async ({ page }) => {
   await open(page);
-  await say(page, 'what should we do about pricing?');
+  await say(page, LONG);
   await allStreaming(page);
   await say(page, '@Theo shorter');
   await expect(bubbleOf(page, 'theo').filter({ hasText: 'STEERED:' })).toHaveCount(1);
-  // The others keep going while Theo adjusts.
-  expect(await grewBetween(page, 300)).toBeGreaterThanOrEqual(1);
+  // Maya and Priya are still mid-stream and keep growing while Theo adjusts.
+  expect(await allGrew(page, ['maya', 'priya'], 300)).toEqual([true, true]);
+  await expect(stopBtn(page)).toBeVisible();
   await expect(bubbleOf(page, 'maya').filter({ hasText: 'STEERED:' })).toHaveCount(0);
   await expect(bubbleOf(page, 'priya').filter({ hasText: 'STEERED:' })).toHaveCount(0);
   await expectNoMechanismWords(page);
-  await expect(stopBtn(page)).toBeHidden();
-  await expectNoMechanismWords(page);
+  await expect(stopBtn(page)).toBeHidden({ timeout: 30_000 });
 });
 
 test('stop everything', async ({ page }) => {
   await open(page);
-  await say(page, 'what should we do about pricing?');
+  await say(page, LONG);
   await allStreaming(page);
   await stopBtn(page).click();
   await expect(stopBtn(page)).toBeHidden();
   const frozen = await texts(page);
   await page.waitForTimeout(1000);
   expect(await texts(page)).toEqual(frozen);
+  // Cut short: nobody reached the end of a 120-chunk stream.
   expect(frozen.every((t) => t.length > 0)).toBe(true);
+  for (const t of frozen) expect(t.split(' ').length).toBeLessThan(100);
+  expect(frozen.join(' ')).not.toMatch(/(maya|theo|priya)119/);
 });
 
 test('reload mid-stream', async ({ page }) => {
