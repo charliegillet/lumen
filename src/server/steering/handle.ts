@@ -30,14 +30,33 @@ export interface SendInput {
 interface Pending {
   segment: number;
   mode: 'continue' | 'replace';
+  /** The segment's truncate point. */
+  keep: number;
   steers: string[];
+  /** actor.lastSeq right after the segment started. */
+  startSeq: number;
 }
 const pending = new WeakMap<Generation, Pending>();
 /** One compliance check per generation, shared by every steer that hit it. */
 const judged = new WeakMap<Generation, Promise<void>>();
-/** Bumped by every stop_all; work queued before a stop must not start after it. */
-const stopEpochs = new WeakMap<ConversationActor, number>();
-const stopEpoch = (a: ConversationActor) => stopEpochs.get(a) ?? 0;
+/**
+ * Stop stamps: the seq of the latest stop_all, and per agent the seq of the
+ * latest stop that hit it. Queued work (a forced reply after waiting, a reopen,
+ * a compliance redo) never starts an agent stopped after its trigger.
+ */
+interface Stops {
+  all: number;
+  agent: Map<AgentId, number>;
+}
+const stopsOf = new WeakMap<ConversationActor, Stops>();
+function stops(a: ConversationActor): Stops {
+  let s = stopsOf.get(a);
+  if (!s) stopsOf.set(a, (s = { all: 0, agent: new Map() }));
+  return s;
+}
+const stoppedAllSince = (a: ConversationActor, seq: number) => stops(a).all > seq;
+const stoppedSince = (a: ConversationActor, id: AgentId, seq: number) =>
+  stoppedAllSince(a, seq) || (stops(a).agent.get(id) ?? 0) > seq;
 
 /**
  * Records the human's message, then (asynchronously, in `settled`) decides
@@ -53,15 +72,20 @@ export async function handleUserMessage(
   if (dup) return { seq: dup.seq, settled: Promise.resolve() };
   const messageId = randomUUID();
   const ev = actor.append({ type: 'user_message', messageId, clientMsgId: i.clientMsgId, text: i.text });
-  const settled = handle(actor, messageId, i).catch((err: unknown) => {
+  const settled = handle(actor, messageId, ev.seq, i).catch((err: unknown) => {
     console.warn(`conversation ${actor.id}: handling message ${messageId} failed`, err);
   });
   return { seq: ev.seq, settled };
 }
 
 /**
- * Stops every live generation at what the client displayed. Idempotent per
- * clientReqId; with nothing live it appends nothing and returns seq null.
+ * Stops every live generation at what the client displayed and aborts the
+ * running turn (including one still gating, before anyone speaks).
+ * Idempotent per clientReqId. Appends nothing and returns seq null only when
+ * nothing is live and no turn is active.
+ *
+ * clientReqId convention: the Stop button sends its own id; a stop typed as
+ * a chat message uses `msg:<clientMsgId>`, so retrying that send is idempotent too.
  */
 export function handleStop(
   actor: ConversationActor,
@@ -70,18 +94,19 @@ export function handleStop(
   const prior = actor.findStopAll(i.clientReqId);
   if (prior) return { seq: prior.seq };
   const live = [...actor.generations.values()];
-  if (live.length === 0) return { seq: null };
+  const turn = actor.turnAbort;
+  const turnActive = turn !== null && !turn.signal.aborted;
+  if (live.length === 0 && !turnActive) return { seq: null };
   const ev = actor.append({ type: 'stop_all', clientReqId: i.clientReqId });
-  stopEpochs.set(actor, stopEpoch(actor) + 1);
-  actor.turnAbort?.abort();
-  for (const g of live) stopAt(g, i.rendered);
+  stops(actor).all = ev.seq;
+  turn?.abort();
+  for (const g of live) stopAt(actor, g, i.rendered);
   return { seq: ev.seq };
 }
 
 // ---------------------------------------------------------------------------
 
-async function handle(actor: ConversationActor, userMessageId: string, i: SendInput): Promise<void> {
-  const epoch = stopEpoch(actor);
+async function handle(actor: ConversationActor, userMessageId: string, userSeq: number, i: SendInput): Promise<void> {
   const liveAtSend = [...actor.generations.values()];
   const regex = parseTargets(i.text);
   const targets: AgentId[] = [];
@@ -96,7 +121,7 @@ async function handle(actor: ConversationActor, userMessageId: string, i: SendIn
       const hit = all ? liveAtSend : liveAtSend.filter((g) => regex.targets.includes(g.agentId));
       if (hit.length > 0) {
         if (all) handleStop(actor, { clientReqId: `msg:${i.clientMsgId}`, rendered: i.rendered });
-        else for (const g of hit) stopAt(g, i.rendered);
+        else for (const g of hit) stopAt(actor, g, i.rendered);
         targets.push(...uniq(hit.map((g) => g.agentId)));
         return;
       }
@@ -117,13 +142,13 @@ async function handle(actor: ConversationActor, userMessageId: string, i: SendIn
         text: d.standing_text ?? i.text,
       });
     }
-    if (stopEpoch(actor) !== epoch) return; // stopped while classifying: the stop wins
+    if (stoppedAllSince(actor, userSeq)) return; // stopped while classifying: the stop wins
 
     if (d.kind === 'stop') {
       const live = [...actor.generations.values()];
       const hit = named.length > 0 ? live.filter((g) => named.includes(g.agentId)) : live;
       if (named.length === 0) handleStop(actor, { clientReqId: `msg:${i.clientMsgId}`, rendered: i.rendered });
-      else for (const g of hit) stopAt(g, i.rendered);
+      else for (const g of hit) stopAt(actor, g, i.rendered);
       targets.push(...uniq(hit.map((g) => g.agentId)));
       return;
     }
@@ -137,17 +162,15 @@ async function handle(actor: ConversationActor, userMessageId: string, i: SendIn
       if (want.length > 0) {
         const forced: AgentId[] = [];
         for (const id of want) {
+          if (stoppedSince(actor, id, userSeq)) continue; // stopped after this steer was sent
           const g = steerAgent(actor, id, d.apply, i);
           if (g) {
             targets.push(id);
             waits.push(judgeWhenDone(actor, g));
           } else forced.push(id);
         }
-        if (forced.length > 0) {
-          then = async () => {
-            if (stopEpoch(actor) === epoch) await runTurn(actor, { triggerMessageId: userMessageId, forced });
-          };
-        }
+        const fresh = forced.filter((id) => startable(actor, id, userSeq));
+        if (fresh.length > 0) then = () => runTurn(actor, { triggerMessageId: userMessageId, forced: fresh });
         return;
       }
     }
@@ -161,7 +184,10 @@ async function handle(actor: ConversationActor, userMessageId: string, i: SendIn
       forced.length > 0 ? busy.length > 0 : AGENT_IDS.every((id) => live.some((g) => g.agentId === id));
     then = async () => {
       if (mustWait) await Promise.allSettled(busy.map((g) => g.done));
-      if (stopEpoch(actor) === epoch) await runTurn(actor, { triggerMessageId: userMessageId, forced });
+      if (stoppedAllSince(actor, userSeq)) return;
+      if (forced.length === 0) return runTurn(actor, { triggerMessageId: userMessageId, forced });
+      const now = forced.filter((id) => startable(actor, id, userSeq));
+      if (now.length > 0) await runTurn(actor, { triggerMessageId: userMessageId, forced: now });
     };
   };
 
@@ -221,12 +247,12 @@ function steerAgent(
   i: SendInput,
 ): Generation | null {
   const live = liveBy(actor, agentId);
-  if (live && restartLive(live, apply, i)) return live;
+  if (live && restartLive(actor, live, apply, i)) return live;
 
   const m = latestBy(actor, agentId);
   if (!m || !justFinished(m, i.typingStartedAt, Date.now()) || actor.generations.has(m.id)) return null;
   const g = reopenGeneration(actor, m.id, [i.text]);
-  pending.set(g, { segment: g.segment, mode: 'replace', steers: [i.text] });
+  pending.set(g, { segment: g.segment, mode: 'replace', keep: 0, steers: [i.text], startSeq: actor.lastSeq });
   return g;
 }
 
@@ -234,14 +260,14 @@ function steerAgent(
  * Debounce: while the previous steer's segment has produced nothing yet,
  * a new steer is merged and the segment restarted with all of them.
  */
-function restartLive(g: Generation, apply: 'continue' | 'replace', i: SendInput): boolean {
+function restartLive(actor: ConversationActor, g: Generation, apply: 'continue' | 'replace', i: SendInput): boolean {
   const p = pending.get(g);
   const merge = p !== undefined && p.segment === g.segment && !g.firstTokenSeen;
   const steers = merge ? [...p.steers, i.text] : [i.text];
   const mode = merge && p.mode === 'replace' ? 'replace' : apply;
   const keep = mode === 'replace' ? 0 : shown(i.rendered, g.messageId, g.textSoFar().length);
   if (!g.restart(mode, keep, steers)) return false;
-  pending.set(g, { segment: g.segment, mode, steers });
+  pending.set(g, { segment: g.segment, mode, keep, steers, startSeq: actor.lastSeq });
   return true;
 }
 
@@ -270,17 +296,16 @@ async function judgeAndRetry(actor: ConversationActor, g: Generation): Promise<v
   const p = pending.get(g);
   const m = byId(actor, g.messageId);
   if (!p || !m || m.status !== 'done' || m.segment !== p.segment) return;
-  const epoch = stopEpoch(actor);
   const seqAtDone = actor.lastSeq;
 
   if (await complies(p.steers, m.text)) return;
 
-  // Skip the redo if anything moved on meanwhile: a stop, a new human
-  // message, or the message itself being reopened.
+  // Skip the redo if anything moved on meanwhile: the agent was stopped, a
+  // new human message, or the message itself being reopened.
   const now = byId(actor, g.messageId);
   const newer = actor.view.messages.some((x) => x.author.kind === 'user' && x.startSeq > seqAtDone);
-  if (stopEpoch(actor) !== epoch || newer || !now || now.status !== 'done' || now.segment !== p.segment) return;
-  if (actor.generations.has(g.messageId)) return;
+  if (stoppedSince(actor, g.agentId, p.startSeq) || newer) return;
+  if (!now || now.status !== 'done' || now.segment !== p.segment || actor.generations.has(g.messageId)) return;
   await reopenGeneration(actor, g.messageId, p.steers).done; // final, not judged again
 }
 
@@ -302,13 +327,18 @@ async function complies(steers: string[], text: string): Promise<boolean> {
 
 // ---------------------------------------------------------------------------
 
-function stopAt(g: Generation, rendered: Record<string, number>): void {
+function stopAt(actor: ConversationActor, g: Generation, rendered: Record<string, number>): void {
   try {
     g.stop(shown(rendered, g.messageId, g.textSoFar().length));
   } catch (err) {
     console.warn(`generation ${g.messageId}: stop failed`, err); // stop() still ends it
+  } finally {
+    stops(actor).agent.set(g.agentId, actor.lastSeq);
   }
 }
+
+/** May queued work for the message at `seq` still start this agent? */
+const startable = (a: ConversationActor, id: AgentId, seq: number) => !stoppedSince(a, id, seq);
 
 /** Chars the client displayed, or `fallback` when it sent nothing usable. */
 function shown(rendered: Record<string, number>, messageId: string, fallback: number): number {
