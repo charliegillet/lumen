@@ -20,6 +20,10 @@ export class Chat {
   private readonly db: Db;
   private readonly dir: string;
   private settles: Promise<void>[] = [];
+  /** Wall-clock deadline; past it the chat is stopped and waits return at once. */
+  deadline = Infinity;
+  /** Set once the deadline stopped the conversation. */
+  cut = false;
 
   constructor() {
     this.dir = mkdtempSync(join(tmpdir(), 'lumen-eval-'));
@@ -33,6 +37,7 @@ export class Chat {
 
   /** Sends without waiting for the agents. */
   async send(text: string, rendered: Record<string, number> = {}): Promise<number> {
+    if (this.overDeadline()) return this.actor.lastSeq;
     const { seq, settled } = await handleUserMessage(this.actor, {
       clientMsgId: randomUUID(),
       text,
@@ -52,9 +57,11 @@ export class Chat {
 
   /** Waits for all handling to settle and no generation or turn to be live for QUIET_MS. */
   async quiet(): Promise<void> {
-    await Promise.all(this.settles);
+    const left = this.deadline - Date.now();
+    if (left > 0) await Promise.race([Promise.all(this.settles), sleep(left)]);
     let since: number | null = null;
     for (;;) {
+      if (this.overDeadline()) return;
       const turn = this.actor.turnAbort;
       const busy = this.actor.generations.size > 0 || (turn !== null && !turn.signal.aborted);
       if (busy) since = null;
@@ -70,7 +77,7 @@ export class Chat {
     for (;;) {
       const v = pred();
       if (v) return v;
-      if (Date.now() - t0 > ms) throw new Error('until: timed out');
+      if (Date.now() - t0 > ms || this.overDeadline()) throw new Error('until: timed out');
       await sleep(10);
     }
   }
@@ -93,6 +100,16 @@ export class Chat {
       .filter((m) => m.startSeq > afterSeq && m.text.trim() !== '')
       .map((m) => `${authorName(m)}: ${m.text}`)
       .join('\n\n');
+  }
+
+  /** True past the deadline; the first call stops everything still running. */
+  overDeadline(): boolean {
+    if (Date.now() < this.deadline) return false;
+    if (!this.cut) {
+      this.cut = true;
+      this.stop();
+    }
+    return true;
   }
 
   stop(): void {

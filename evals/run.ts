@@ -12,7 +12,10 @@ import { modelSpec } from '../src/server/llm/registry.js';
 import { CASES, type Case, type CaseResult } from './cases.js';
 import { Chat } from './harness.js';
 
+/** Conversation budget per run: past it the chat is stopped and graded as it stands. */
 const CASE_TIMEOUT_MS = 90_000;
+/** Hard cap including grading, in case a judge hangs. */
+const HARD_TIMEOUT_MS = 150_000;
 const RESULTS = 'docs/notes/eval-results.md';
 const RUNS_DIR = 'evals/runs';
 const BEGIN = '<!-- eval:begin -->';
@@ -40,19 +43,20 @@ function args() {
 
 async function runOnce(c: Case, i: number): Promise<Run> {
   const chats: Chat[] = [];
+  const t0 = Date.now();
   const ctx = {
     chat() {
       const ch = new Chat();
+      ch.deadline = t0 + CASE_TIMEOUT_MS;
       chats.push(ch);
       return ch;
     },
   };
-  const t0 = Date.now();
   let timer: NodeJS.Timeout | undefined;
   const timeout = new Promise<CaseResult>((resolve) => {
     timer = setTimeout(
-      () => resolve({ pass: false, note: `aborted after ${CASE_TIMEOUT_MS / 1000}s`, failure: 'timed out' }),
-      CASE_TIMEOUT_MS,
+      () => resolve({ pass: false, note: `aborted after ${HARD_TIMEOUT_MS / 1000}s`, failure: 'timed out' }),
+      HARD_TIMEOUT_MS,
     );
   });
   let r: CaseResult;
@@ -64,6 +68,7 @@ async function runOnce(c: Case, i: number): Promise<Run> {
     clearTimeout(timer);
   }
   const ms = Date.now() - t0;
+  if (chats.some((ch) => ch.cut)) r = { ...r, note: `${r.note} (conversation cut at ${CASE_TIMEOUT_MS / 1000}s)` };
   mkdirSync(RUNS_DIR, { recursive: true });
   writeFileSync(
     join(RUNS_DIR, `${c.name}-${i + 1}.txt`),
