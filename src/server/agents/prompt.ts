@@ -163,7 +163,9 @@ function finalBlock(p: Persona, mode: PromptMode): string {
       ].join('\n');
     case 'reply': {
       const others = mode.othersReplying.filter((id) => id !== p.id).map(nameOf);
-      const lines = [`Write your next message in the chat. The point to cover: «${mode.gist}».`];
+      // A forced agent (mentioned, no bid) has no gist.
+      const ask = mode.gist.trim() === '' ? 'Respond to the message that addressed you.' : `The point to cover: «${mode.gist}».`;
+      const lines = [`Write your next message in the chat. ${ask}`];
       if (others.length > 0) {
         lines.push(
           `${joinNames(others)} ${others.length === 1 ? 'is' : 'are'} replying at the same time; cover only your point.`,

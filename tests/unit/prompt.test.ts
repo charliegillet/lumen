@@ -310,6 +310,15 @@ describe('buildPrompt', () => {
     expect(textOf(last(solo.messages))).not.toContain('at the same time');
   });
 
+  it('reply mode without a gist (forced agent) asks to answer whoever addressed it', () => {
+    const log = fixture();
+    const p = buildPrompt('priya', log.events, log.seq, { kind: 'reply', gist: '', effort: 'medium', hop: 1, othersReplying: [] });
+    const t = textOf(last(p.messages));
+    expect(t).toContain('Respond to the message that addressed you.');
+    expect(t).not.toContain('The point to cover');
+    expect(t).not.toContain('«»');
+  });
+
   it('gate mode asks for the bid with roster and hop, without a length hint', () => {
     const log = fixture();
     const p = buildPrompt('theo', log.events, log.seq, { kind: 'gate', hop: 3 });
