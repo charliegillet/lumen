@@ -9,6 +9,8 @@ export interface MessageView {
   segment: number;
   completedAt: number | null;
   hop: number;
+  /** User messages only: the sender's id, so a client can match its unconfirmed send. */
+  clientMsgId?: string;
 }
 export interface ConversationView {
   lastSeq: number;
@@ -62,6 +64,7 @@ export function applyEvent(view: ConversationView, e: ConvEvent): ConversationVi
             segment: 0,
             completedAt: e.at,
             hop: 0,
+            clientMsgId: e.clientMsgId,
           },
         ],
       };

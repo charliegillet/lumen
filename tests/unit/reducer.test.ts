@@ -134,4 +134,10 @@ describe('reducer', () => {
     ]);
     expect(visibleMessages(v).map((m) => m.id)).toEqual(['u1', 'B']);
   });
+
+  it('keeps the clientMsgId on user messages only', () => {
+    const v = fold([user(1, 'u1'), started(2, 'A')]);
+    expect(msg(v, 'u1').clientMsgId).toBe('cmu1');
+    expect(msg(v, 'A').clientMsgId).toBeUndefined();
+  });
 });
