@@ -81,7 +81,8 @@ export class Generation {
         effort: a.effort,
       });
     } catch (err) {
-      actor.generations.delete(this.messageId);
+      this.terminal = true;
+      this.settle('error');
       throw err;
     }
     this.launch(this.current, 'reply', cutoff, {
@@ -105,22 +106,30 @@ export class Generation {
    */
   restart(mode: 'continue' | 'replace', truncateTo: number, steers: string[]): boolean {
     if (this.terminal) return false;
-    const keep = mode === 'continue' ? Math.max(0, truncateTo) : 0;
-    const partial = this.textSoFar().slice(0, keep);
+    const committed = this.textSoFar();
+    const keep = mode === 'continue' ? clamp(truncateTo, committed.length) : 0;
+    const partial = committed.slice(0, keep);
     this.retire(this.current); // unflushed text was never visible: drop it
 
     this.segment += 1;
     this.firstTokenSeen = false;
-    this.current = newSegment(this.segment, mode === 'continue' ? partial : '');
+    this.current = newSegment(this.segment, partial);
     const cutoff = this.actor.lastSeq;
-    this.actor.append({
-      type: 'message_segment_started',
-      messageId: this.messageId,
-      segment: this.segment,
-      contextCutoffSeq: cutoff,
-      truncateTo: keep,
-      mode,
-    });
+    try {
+      this.actor.append({
+        type: 'message_segment_started',
+        messageId: this.messageId,
+        segment: this.segment,
+        contextCutoffSeq: cutoff,
+        truncateTo: keep,
+        mode,
+      });
+    } catch (err) {
+      this.terminal = true;
+      this.retire(this.current);
+      this.settle('error');
+      throw err;
+    }
     this.launch(
       this.current,
       mode,
@@ -135,15 +144,19 @@ export class Generation {
   /** User stop: truncate to what the user saw and end the message. No-op once terminal. */
   stop(truncateTo: number): void {
     if (this.terminal) return;
+    const keep = clamp(truncateTo, this.textSoFar().length);
     this.terminal = true;
     this.retire(this.current);
-    this.actor.append({
-      type: 'message_aborted',
-      messageId: this.messageId,
-      reason: 'user_stop',
-      truncateTo: Math.max(0, truncateTo),
-    });
-    this.settle('stopped');
+    try {
+      this.actor.append({
+        type: 'message_aborted',
+        messageId: this.messageId,
+        reason: 'user_stop',
+        truncateTo: keep,
+      });
+    } finally {
+      this.settle('stopped'); // a failed append still ends the generation (and rethrows)
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -161,7 +174,10 @@ export class Generation {
       queueMicrotask(() => this.fail(seg, err));
       return;
     }
-    void this.run(seg, kind, prompt);
+    this.run(seg, kind, prompt).catch((err: unknown) => {
+      // run() handles its own errors; this is a last line of defence.
+      console.warn(`generation ${this.messageId}: unexpected error`, err);
+    });
   }
 
   private async run(
@@ -186,12 +202,18 @@ export class Generation {
       if (!this.live(seg)) return;
       this.releaseHead(seg);
       this.flush(seg);
-      this.terminal = true;
-      this.retire(seg);
+    } catch (err) {
+      this.fail(seg, err);
+      return;
+    }
+    this.terminal = true;
+    this.retire(seg);
+    try {
       this.actor.append({ type: 'message_completed', messageId: this.messageId });
       this.settle('completed');
     } catch (err) {
-      this.fail(seg, err);
+      console.warn(`generation ${this.messageId}: could not append message_completed`, err);
+      this.settle('error');
     }
   }
 
@@ -200,7 +222,7 @@ export class Generation {
     this.firstTokenSeen = true;
     if (seg.head !== null) {
       seg.head += chunk;
-      if (seg.head.length >= OVERLAP_WINDOW) this.releaseHead(seg);
+      if (!mustHold(seg.partial, seg.head)) this.releaseHead(seg);
       return;
     }
     this.buffer(seg, chunk);
@@ -211,7 +233,7 @@ export class Generation {
     if (seg.head === null) return;
     const head = seg.head;
     seg.head = null;
-    const rest = head.slice(overlapLength(seg.partial, head.slice(0, OVERLAP_WINDOW)));
+    const rest = stripContinuation(seg.partial, head);
     if (rest !== '') this.buffer(seg, rest);
   }
 
@@ -261,6 +283,8 @@ export class Generation {
         reason: 'error',
         truncateTo: this.textSoFar().length,
       });
+    } catch (err2) {
+      console.warn(`generation ${this.messageId}: could not append message_aborted`, err2);
     } finally {
       this.settle('error');
     }
@@ -291,12 +315,43 @@ function newSegment(segment: number, partial: string): Segment {
   };
 }
 
-/** Longest k ≥ MIN_OVERLAP such that `partial` ends with `head.slice(0, k)`; else 0. */
+const clamp = (n: number, max: number) => Math.min(Math.max(0, n), max);
+const WS_END = /\s$/;
+const WS_START = /^\s+/;
+
+/**
+ * Keep holding the continuation's head while a longer overlap with the
+ * partial's tail is still possible: some suffix of the partial (longer than
+ * head, at most OVERLAP_WINDOW) starts with head. Also hold pure whitespace
+ * after a partial ending in whitespace, so it can be collapsed.
+ */
+export function mustHold(partial: string, head: string): boolean {
+  if (WS_END.test(partial) && head.trim() === '') return true;
+  const max = Math.min(partial.length, OVERLAP_WINDOW);
+  for (let len = head.length + 1; len <= max; len++) {
+    if (partial.endsWith(head, partial.length - len + head.length)) return true;
+  }
+  return false;
+}
+
+/**
+ * Longest k such that `partial` ends with `head.slice(0, k)` and the overlap is
+ * worth stripping: k ≥ MIN_OVERLAP and it spans a word boundary (whitespace
+ * inside its trimmed form) or is ≥ 8 chars. This keeps a real doubled word
+ * ("said that " + "that is") intact. Returns 0 when nothing qualifies.
+ */
 export function overlapLength(partial: string, head: string): number {
-  for (let k = Math.min(partial.length, head.length); k >= MIN_OVERLAP; k--) {
-    if (partial.endsWith(head.slice(0, k))) return k;
+  for (let k = Math.min(partial.length, head.length, OVERLAP_WINDOW); k >= MIN_OVERLAP; k--) {
+    const o = head.slice(0, k);
+    if (partial.endsWith(o)) return /\s/.test(o.trim()) || k >= 8 ? k : 0;
   }
   return 0;
+}
+
+/** Strip a repeated overlap, then collapse doubled whitespace at the seam. */
+export function stripContinuation(partial: string, head: string): string {
+  const rest = head.slice(overlapLength(partial, head));
+  return WS_END.test(partial) ? rest.replace(WS_START, '') : rest;
 }
 
 export function startGeneration(actor: ConversationActor, a: StartArgs): Generation {
