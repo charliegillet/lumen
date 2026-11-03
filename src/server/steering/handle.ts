@@ -30,7 +30,7 @@ export interface SendInput {
 interface Pending {
   segment: number;
   mode: 'continue' | 'replace';
-  /** The segment's truncate point. */
+  /** The segment's own truncate point; a merged steer reuses it. */
   keep: number;
   steers: string[];
   /** actor.lastSeq right after the segment started. */
@@ -258,14 +258,17 @@ function steerAgent(
 
 /**
  * Debounce: while the previous steer's segment has produced nothing yet,
- * a new steer is merged and the segment restarted with all of them.
+ * a new steer is merged and the segment restarted with all of them, from
+ * that segment's own truncate point (the client's newer `rendered` may still
+ * count text from before the first steer).
  */
 function restartLive(actor: ConversationActor, g: Generation, apply: 'continue' | 'replace', i: SendInput): boolean {
   const p = pending.get(g);
   const merge = p !== undefined && p.segment === g.segment && !g.firstTokenSeen;
   const steers = merge ? [...p.steers, i.text] : [i.text];
   const mode = merge && p.mode === 'replace' ? 'replace' : apply;
-  const keep = mode === 'replace' ? 0 : shown(i.rendered, g.messageId, g.textSoFar().length);
+  const keep =
+    mode === 'replace' ? 0 : merge ? p.keep : shown(i.rendered, g.messageId, g.textSoFar().length);
   if (!g.restart(mode, keep, steers)) return false;
   pending.set(g, { segment: g.segment, mode, keep, steers, startSeq: actor.lastSeq });
   return true;
