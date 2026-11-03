@@ -1,9 +1,6 @@
 {
   "name": "emanate-group-chat",
   "version": "1.0.0",
-  "directories": {
-    "doc": "docs"
-  },
   "scripts": {
     "dev": "tsx watch src/server/index.ts",
     "build": "vite build && tsc -p tsconfig.server.json",
@@ -20,11 +17,7 @@
     "url": "git+https://github.com/charliegillet/emanate-takehome.git"
   },
   "type": "module",
-  "bugs": {
-    "url": "https://github.com/charliegillet/emanate-takehome/issues"
-  },
-  "homepage": "https://github.com/charliegillet/emanate-takehome#readme",
-  "private": "true",
+  "private": true,
   "dependencies": {
     "@ai-sdk/openai": "^4.0.108",
     "@ai-sdk/openai-compatible": "^3.0.84",
@@ -48,5 +41,8 @@
     "typescript": "^7.0.2",
     "vite": "^8.3.5",
     "vitest": "^4.1.12"
+  },
+  "engines": {
+    "node": ">=22"
   }
 }
