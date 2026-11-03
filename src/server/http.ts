@@ -55,6 +55,8 @@ const bad = (c: Context, error: string) => c.json({ error }, 400);
 export function createApp(db: Db): Hono {
   const app = new Hono();
 
+  app.get('/api/health', (c) => c.json({ ok: true }));
+
   app.use('/api/conv/:id/*', async (c, next) => {
     if (!CONV_ID.test(c.req.param('id') ?? '')) return c.json({ error: 'not found' }, 404);
     await next();

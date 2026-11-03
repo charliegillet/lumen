@@ -82,6 +82,12 @@ const post = (path: string, body: unknown) =>
 const msgBody = (o: object = {}) => ({ clientMsgId: 'c1', text: 'hello', typingStartedAt: null, rendered: {}, ...o });
 
 describe('snapshot + events', () => {
+  it('health check returns ok', async () => {
+    const res = await app.request('/api/health');
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true });
+  });
+
   it('snapshot then events after has no gap or dup', async () => {
     const actor = getActor(db, 'c1');
     for (let i = 0; i < 3; i++) actor.append({ type: 'user_message', messageId: `m${i}`, clientMsgId: `x${i}`, text: 't' });
