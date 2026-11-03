@@ -26,6 +26,12 @@ describe('classifySteer', () => {
     expect(d.targets).toEqual(['theo']);
   });
 
+  it('guides stop-like openers followed by an instruction to steer', async () => {
+    setFakeScript(() => ({ error: 'boom' }));
+    await classifySteer({ ...base, text: 'Theo wait, focus on pricing' });
+    expect(fakeRequests[0]!.system).toMatch(/stop-like opener followed by an instruction[^\n]*is "steer", not "stop"/);
+  });
+
   it('request contains no private notes canary', async () => {
     setFakeScript(() => ({ object: { kind: 'new_message', targets: [], apply: 'continue', scope: 'one_off', standing_text: null, revokes: [] } }));
     await classifySteer({ ...base, instructions: [{ id: 'i1', scope: 'all', text: 'be brief' }] });

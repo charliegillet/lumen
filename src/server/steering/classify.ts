@@ -30,6 +30,7 @@ Decide:
 - scope: "standing" for "from now on", "always", "never", or a style rule meant to persist. When the scope of a style instruction (language, length, tone) is ambiguous, choose standing. Otherwise "one_off".
 - standing_text: for standing scope, the instruction rewritten as a short imperative; otherwise null.
 - revokes: ids of existing standing instructions that this message cancels or supersedes; otherwise [].
+A stop-like opener followed by an instruction ("wait, focus on pricing", "hold on, make it shorter") is "steer", not "stop": the person wants the reply redirected, not ended. A stop-like opener followed by a question or new topic ("wait, what about pricing?") is "steer" when it bears on what agents are writing, else "new_message". Use "stop" only when the person wants the writing to end.
 Unrelated chatter is "new_message". Respond with the JSON object only.`;
 
 const tail = (s: string, n: number) => (s.length > n ? s.slice(-n) : s);
