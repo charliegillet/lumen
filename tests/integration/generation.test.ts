@@ -2,9 +2,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { openDb, type Db } from '../../src/server/db.js';
 import { ConversationActor } from '../../src/server/actor.js';
 import { fakeRequests, resetFake, setFakeScript } from '../../src/server/llm/fake.js';
-import { startGeneration, type Generation } from '../../src/server/orchestrator/generation.js';
+import {
+  mustHold,
+  overlapLength,
+  startGeneration,
+  stripContinuation,
+  type Generation,
+} from '../../src/server/orchestrator/generation.js';
 import { visibleMessages } from '../../src/shared/reducer.js';
-import type { AgentId, ConvEvent } from '../../src/shared/events.js';
+import type { AgentId, ConvEvent, EventBody } from '../../src/shared/events.js';
 
 // Lets one test replace streamChat with a stream that ignores abort and keeps
 // delivering chunks late, like a misbehaving SDK buffer.
@@ -243,5 +249,189 @@ describe('Generation', () => {
     expect(await g.done).toBe('error');
     expect(msg(g)?.status).toBe('stopped');
     expect(visibleMessages(actor.view).some((m) => m.id === g.messageId)).toBe(false);
+  });
+
+  it('continue shows text after the first chunk (no full-window holdback)', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    hooks.override = (a) =>
+      (async function* () {
+        if (a.meta.kind === 'reply') {
+          yield 'The plan is to ';
+          await new Promise<never>(() => {}); // until superseded
+        } else {
+          yield 'ship ';
+          await gate;
+          yield 'Friday.';
+        }
+      })();
+    const g = start();
+    await waitFor(() => g.textSoFar() === 'The plan is to ');
+    g.restart('continue', 12, ['be brief']);
+    await waitFor(() => g.textSoFar() === 'The plan is ship ');
+    release();
+    expect(await g.done).toBe('completed');
+    expect(msg(g)?.text).toBe('The plan is ship Friday.');
+  });
+
+  it('restart twice before the first restart yields', async () => {
+    let calls = 0;
+    setFakeScript(() => {
+      calls += 1;
+      if (calls === 1) return { chunks: Array.from({ length: 20 }, () => 'a'), delayMs: 30 };
+      if (calls === 2) return { chunks: ['SECOND'], delayMs: 50 };
+      return { chunks: ['th', 'ird'], delayMs: 5 };
+    });
+    const g = start();
+    await waitFor(() => g.textSoFar().length > 0);
+    expect(g.restart('replace', 0, ['one'])).toBe(true);
+    expect(g.restart('replace', 0, ['two'])).toBe(true);
+    expect(g.segment).toBe(2);
+    expect(await g.done).toBe('completed');
+    expect(msg(g)?.text).toBe('third');
+    const segs = eventsFor(g).filter((e) => e.type === 'message_segment_started');
+    expect(segs.map((e) => ('segment' in e ? e.segment : -1))).toEqual([1, 2]);
+    const lastSegSeq = segs.at(-1)?.seq ?? 0;
+    expect(deltas(g).filter((d) => d.segment === 1)).toEqual([]);
+    expect(deltas(g).filter((d) => d.seq > lastSegSeq).every((d) => d.segment === 2)).toBe(true);
+    expect(JSON.stringify(fakeRequests.at(-1)?.messages)).toContain('two');
+  });
+
+  it('restart during the continue head holdback', async () => {
+    setFakeScript((r) => {
+      if (r.kind === 'continue') return { chunks: [' ', 'is', ' going'], delayMs: 60 };
+      if (r.kind === 'replace') return { chunks: ['fresh'], delayMs: 5 };
+      return { chunks: ['The plan is to ', 'go ', 'on ', 'and ', 'on.'], delayMs: 40 };
+    });
+    const g = start();
+    await waitFor(() => g.textSoFar().startsWith('The plan is to '));
+    g.restart('continue', 12, ['be brief']);
+    await waitFor(() => g.firstTokenSeen); // ' ' is held: " is " may still overlap
+    expect(g.textSoFar()).toBe('The plan is ');
+    g.restart('replace', 0, ['start over']);
+    expect(await g.done).toBe('completed');
+    expect(msg(g)?.text).toBe('fresh');
+    expect(deltas(g).filter((d) => d.segment === 1)).toEqual([]);
+  });
+
+  it('clamps truncateTo to the committed length', async () => {
+    setFakeScript((r) =>
+      r.kind === 'continue'
+        ? { chunks: ['!'], delayMs: 5 }
+        : { chunks: ['abc', 'def', 'ghi', 'jkl'], delayMs: 40 },
+    );
+    const g = start();
+    await waitFor(() => g.textSoFar().length > 0);
+    const committed = g.textSoFar().length;
+    g.restart('continue', 999, ['x']);
+    const seg = eventsFor(g).find((e) => e.type === 'message_segment_started');
+    expect(seg).toMatchObject({ truncateTo: committed });
+    await g.done;
+    const g2 = start('theo');
+    await waitFor(() => g2.textSoFar().length > 0);
+    const c2 = g2.textSoFar().length;
+    g2.stop(10_000);
+    expect(eventsFor(g2).at(-1)).toMatchObject({ type: 'message_aborted', truncateTo: c2 });
+  });
+
+  describe('append failures', () => {
+    const uncaught: unknown[] = [];
+    const onErr = (e: unknown) => uncaught.push(e);
+    beforeEach(() => {
+      uncaught.length = 0;
+      process.on('uncaughtException', onErr);
+      process.on('unhandledRejection', onErr);
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+    });
+    afterEach(() => {
+      process.off('uncaughtException', onErr);
+      process.off('unhandledRejection', onErr);
+    });
+    function failOn(types: EventBody['type'][], times = 1) {
+      const orig = actor.append.bind(actor);
+      const left = new Map(types.map((t) => [t, times]));
+      vi.spyOn(actor, 'append').mockImplementation((b: EventBody) => {
+        const n = left.get(b.type) ?? 0;
+        if (n > 0) {
+          left.set(b.type, n - 1);
+          throw new Error(`disk full (${b.type})`);
+        }
+        return orig(b);
+      });
+    }
+
+    it('message_completed append throws once: done resolves error', async () => {
+      setFakeScript(() => ({ chunks: ['Hi'], delayMs: 5 }));
+      failOn(['message_completed']);
+      const g = start();
+      expect(await g.done).toBe('error');
+      expect(actor.generations.has(g.messageId)).toBe(false);
+      await sleep(100);
+      expect(uncaught).toEqual([]);
+    });
+
+    it('token_delta and message_aborted both throw: nothing escapes', async () => {
+      setFakeScript(() => ({ chunks: ['a', 'b'], delayMs: 5 }));
+      failOn(['token_delta', 'message_aborted'], 10);
+      const g = start();
+      expect(await g.done).toBe('error');
+      expect(actor.generations.has(g.messageId)).toBe(false);
+      await sleep(150);
+      expect(uncaught).toEqual([]);
+    });
+
+    it('timer flush failure with failing abort append: nothing escapes', async () => {
+      setFakeScript(() => ({ chunks: ['a', 'b', 'c', 'd', 'e'], delayMs: 40 }));
+      failOn(['token_delta', 'message_aborted'], 10);
+      const g = start();
+      expect(await g.done).toBe('error');
+      await sleep(150);
+      expect(uncaught).toEqual([]);
+    });
+
+    it('message_segment_started append throws: restart rethrows, done resolves error', async () => {
+      setFakeScript(() => ({ chunks: ['a', 'b', 'c', 'd'], delayMs: 40 }));
+      const g = start();
+      await waitFor(() => g.firstTokenSeen);
+      failOn(['message_segment_started']);
+      expect(() => g.restart('replace', 0, ['x'])).toThrow(/disk full/);
+      expect(await g.done).toBe('error');
+      expect(actor.generations.has(g.messageId)).toBe(false);
+      expect(g.restart('replace', 0, ['y'])).toBe(false);
+      await sleep(150);
+      expect(uncaught).toEqual([]);
+    });
+
+    it('stop append throws: stop rethrows, done still resolves', async () => {
+      setFakeScript(() => ({ chunks: ['a', 'b', 'c'], delayMs: 40 }));
+      const g = start();
+      failOn(['message_aborted']);
+      expect(() => g.stop(0)).toThrow(/disk full/);
+      expect(await g.done).toBe('stopped');
+      expect(actor.generations.has(g.messageId)).toBe(false);
+      await sleep(150);
+      expect(uncaught).toEqual([]);
+    });
+  });
+});
+
+describe('continuation seam helpers', () => {
+  it('strips multi-word or long overlaps only', () => {
+    expect(stripContinuation('The plan is ', 'plan is ship it')).toBe('ship it');
+    expect(overlapLength('We use Kubernetes', 'Kubernetes now')).toBe(10); // ≥ 8 chars
+    // A real doubled word survives.
+    expect(stripContinuation('Maya said that ', 'that is fine.')).toBe('that is fine.');
+    expect(overlapLength('foo bar', 'bar baz')).toBe(0);
+  });
+  it('collapses doubled whitespace at the seam', () => {
+    expect(stripContinuation('The plan is ', ' ship it')).toBe('ship it');
+    expect(stripContinuation('The plan is', ' ship it')).toBe(' ship it');
+  });
+  it('holds only while a longer overlap is possible', () => {
+    expect(mustHold('The plan is ', 'ship')).toBe(false);
+    expect(mustHold('The plan is ', 'pl')).toBe(true);
+    expect(mustHold('The plan is ', ' ')).toBe(true);
+    expect(mustHold('The plan is ', ' ship')).toBe(false);
+    expect(mustHold('The plan is ', 'plan is ')).toBe(false); // already the longest
   });
 });
