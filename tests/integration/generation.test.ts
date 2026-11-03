@@ -5,6 +5,7 @@ import { fakeRequests, resetFake, setFakeScript } from '../../src/server/llm/fak
 import {
   mustHold,
   overlapLength,
+  reopenGeneration,
   startGeneration,
   stripContinuation,
   type Generation,
@@ -433,5 +434,59 @@ describe('continuation seam helpers', () => {
     expect(mustHold('The plan is ', ' ')).toBe(true);
     expect(mustHold('The plan is ', ' ship')).toBe(false);
     expect(mustHold('The plan is ', 'plan is ')).toBe(false); // already the longest
+  });
+});
+
+describe('reopenGeneration', () => {
+  it('rewrites a completed message in place with a replace segment', async () => {
+    setFakeScript((r) =>
+      r.kind === 'replace' ? { chunks: ['Short.'], delayMs: 5 } : { chunks: ['A long ', 'answer.'], delayMs: 5 },
+    );
+    const g = start('theo');
+    await g.done;
+    const before = actor.lastSeq;
+    const r = reopenGeneration(actor, g.messageId, ['shorter']);
+    expect(r.messageId).toBe(g.messageId);
+    expect(r.segment).toBe(1);
+    expect(actor.generations.get(g.messageId)).toBe(r);
+    expect(msg(g)?.status).toBe('streaming');
+    expect(msg(g)?.text).toBe('');
+    expect(await r.done).toBe('completed');
+    expect(msg(g)?.text).toBe('Short.');
+    expect(msg(g)?.status).toBe('done');
+    expect(actor.view.messages.filter((m) => m.author.kind === 'agent')).toHaveLength(1);
+    const seg = eventsFor(g).find((e) => e.type === 'message_segment_started');
+    expect(seg).toMatchObject({ segment: 1, truncateTo: 0, mode: 'replace', contextCutoffSeq: before });
+    const last = fakeRequests.at(-1);
+    expect(last?.kind).toBe('replace');
+    expect(last?.agentId).toBe('theo');
+    expect(JSON.stringify(last?.messages)).toContain('shorter');
+    // Deltas of the new segment carry its number.
+    expect(deltas(g).filter((d) => d.segment === 1).map((d) => d.text).join('')).toBe('Short.');
+  });
+
+  it('reopens a stopped message and can be restarted again', async () => {
+    setFakeScript((r) =>
+      r.kind === 'reply'
+        ? { chunks: ['a ', 'b ', 'c ', 'd '], delayMs: 30 }
+        : { chunks: ['x ', 'y ', 'z.'], delayMs: 30 },
+    );
+    const g = start();
+    await waitFor(() => g.textSoFar().length > 0);
+    g.stop(g.textSoFar().length);
+    const r = reopenGeneration(actor, g.messageId, ['one']);
+    expect(r.restart('replace', 0, ['one', 'two'])).toBe(true);
+    expect(r.segment).toBe(2);
+    expect(await r.done).toBe('completed');
+    expect(msg(g)?.text).toBe('x y z.');
+  });
+
+  it('refuses a live or unknown message', async () => {
+    setFakeScript(() => ({ chunks: ['a', 'b'], delayMs: 20 }));
+    const g = start();
+    expect(() => reopenGeneration(actor, g.messageId, ['x'])).toThrow(/live/);
+    expect(() => reopenGeneration(actor, 'nope', ['x'])).toThrow();
+    expect(() => reopenGeneration(actor, 'u1', ['x'])).toThrow();
+    await g.done;
   });
 });
