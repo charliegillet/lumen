@@ -7,12 +7,17 @@ import type { FakeReply, FakeRequest } from './fake.js';
  */
 const def = (r: FakeRequest): FakeReply => {
   switch (r.kind) {
-    case 'reply':
-    case 'continue':
-    case 'replace': {
+    case 'reply': {
       const name = r.agentId ?? 'agent';
       const words = `Hi, this is ${name} with a short answer.`.split(' ');
       return { chunks: words.map((w, i) => (i ? ' ' + w : w)), delayMs: 20 };
+    }
+    case 'continue':
+    case 'replace': {
+      // Steered segments carry a visible marker that tests and e2e assert on.
+      const name = r.agentId ?? 'agent';
+      const words = `${name} adjusted the answer.`.split(' ');
+      return { chunks: ['STEERED: ', ...words.map((w, i) => (i ? ' ' + w : w))], delayMs: 20 };
     }
     case 'gate': {
       const name = r.agentId ?? 'agent';
@@ -30,7 +35,7 @@ const def = (r: FakeRequest): FakeReply => {
         object: { kind: 'new_message', targets: [], apply: 'continue', scope: 'one_off', standing_text: null, revokes: [] },
       };
     case 'judge':
-      return { object: {} };
+      return { object: { complies: true } };
   }
 };
 
