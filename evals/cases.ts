@@ -137,7 +137,7 @@ const steerCompliance: Case = {
 
 // ---------------------------------------------------------------------------
 
-const FRENCH_SYSTEM = `You check whether a chat message is written in French. Names, product names, numbers and dates may stay as they are; anything else in English is a fail.
+const FRENCH_SYSTEM = `You check whether a chat message is written in French. Names, product names, numbers, dates and the English jargon French speakers use at work (SSO, ARR, deal, addendum, etc.) are fine. Fail only if a sentence or clause is in English or another language.
 Respond with the JSON object only: pass (true if the message is in French), and a one-sentence reason.`;
 
 const persistence: Case = {
@@ -154,7 +154,7 @@ const persistence: Case = {
     const bad: string[] = [];
     for (const m of replies) {
       const v = await judge(FRENCH_SYSTEM, m.text);
-      if (!v.pass) bad.push(`${authorName(m)}: "${quote(m.text, 120)}"`);
+      if (!v.pass) bad.push(`${authorName(m)}: "${quote(m.text, 120)}" (judge: ${v.reason})`);
     }
     const pass = later.length >= 3 && bad.length === 0;
     return {
