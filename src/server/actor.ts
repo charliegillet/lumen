@@ -1,12 +1,7 @@
-import type { AgentId, ConvEvent, EventBody } from '../shared/events.js';
+import type { ConvEvent, EventBody } from '../shared/events.js';
 import { applyEvent, fold, type ConversationView } from '../shared/reducer.js';
 import type { Db } from './db.js';
-
-/** Minimal shape of a live generation; a later task retypes the map with the full Generation. */
-export interface LiveGeneration {
-  readonly messageId: string;
-  readonly agentId: AgentId;
-}
+import type { Generation } from './orchestrator/generation.js';
 
 interface Row {
   seq: number;
@@ -20,7 +15,7 @@ interface Row {
  */
 export class ConversationActor {
   readonly id: string;
-  readonly generations = new Map<string, LiveGeneration>();
+  readonly generations = new Map<string, Generation>();
   turnAbort: AbortController | null = null;
 
   private readonly db: Db;
