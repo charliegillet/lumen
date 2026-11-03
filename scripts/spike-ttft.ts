@@ -44,8 +44,15 @@ console.log('reasoning | median TTFT ms | median total ms');
 for (const level of levels) {
   const rs = [];
   for (let i = 0; i < RUNS; i++) rs.push(await once(level));
+  const withText = rs.filter((r) => !Number.isNaN(r.ttft));
+  const noText = rs.length - withText.length;
+  if (withText.length === 0) {
+    console.error(`${level}: all ${RUNS} runs produced no text; check model id / key`);
+    process.exit(1);
+  }
   console.log(
-    `${level.padEnd(9)} | ${median(rs.map((r) => r.ttft)).toFixed(0).padStart(14)} | ${median(rs.map((r) => r.total)).toFixed(0).padStart(15)}`,
+    `${level.padEnd(9)} | ${median(withText.map((r) => r.ttft)).toFixed(0).padStart(14)} | ${median(withText.map((r) => r.total)).toFixed(0).padStart(15)}` +
+      (noText ? `  (${noText}/${RUNS} runs produced no text, excluded)` : ''),
   );
 }
 
@@ -59,6 +66,8 @@ const result = streamText({
   onError: () => {},
 });
 let afterAbort = 0;
+let beforeAbort = 0;
+let streamError: unknown;
 let aborted = false;
 setTimeout(() => {
   ac.abort();
@@ -66,13 +75,26 @@ setTimeout(() => {
 }, 1000);
 try {
   for await (const part of result.fullStream) {
-    if (aborted && part.type === 'text-delta') afterAbort++;
+    if (part.type === 'text-delta') {
+      if (aborted) afterAbort++;
+      else beforeAbort++;
+    } else if (part.type === 'error' && !aborted) {
+      streamError = part.error;
+    }
   }
-} catch {
-  /* abort may throw */
+} catch (e) {
+  if (!aborted) streamError = e;
+}
+if (streamError) {
+  console.error('abort check invalid: request errored before abort:', streamError);
+  process.exit(1);
+}
+if (beforeAbort === 0) {
+  console.error('abort check invalid: no text arrived within 1 s before abort');
+  process.exit(1);
 }
 if (afterAbort > 0) {
   console.error(`abort FAILED: ${afterAbort} text deltas after abort`);
   process.exit(1);
 }
-console.log('abort ok');
+console.log(`abort ok (${beforeAbort} deltas before abort, 0 after)`);

@@ -19,3 +19,6 @@ To do after the run:
 1. Confirm `gpt-6-luna` exists: `curl -s https://api.openai.com/v1/models -H "Authorization: Bearer $OPENAI_API_KEY" | grep -o '"id": *"gpt-[^"]*luna[^"]*"'`
 2. Paste the TTFT table and the `abort ok` line here.
 3. Decision rule: if median TTFT at the lowest reasoning level is over 700 ms, set `gpt-5.6-luna` as the default in `.env.example` and re-run (`SPIKE_MODEL=gpt-5.6-luna npm run spike`).
+
+## Conventions
+Server code (`src/shared`, `src/server`) is built with NodeNext ESM (`tsconfig.server.json`), so relative imports must include the `.js` extension (e.g. `import { x } from './db.js'`).
