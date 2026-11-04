@@ -15,6 +15,8 @@ export interface FakeRequest {
   system: string;
   messages: ModelMessage[];
   prompt?: string;
+  /** The reasoning effort the call asked for, if any. */
+  reasoning?: string;
 }
 export type FakeReply =
   /** `hangAfterChunks`: after that many chunks the stream goes silent until aborted. */
@@ -74,6 +76,7 @@ function capture(o: LanguageModelV4CallOptions): FakeRequest {
   };
   const agentId = h['x-agent-id'] as AgentId | undefined;
   if (agentId) req.agentId = agentId;
+  if (o.reasoning !== undefined) req.reasoning = o.reasoning;
   fakeRequests.push(req);
   return req;
 }

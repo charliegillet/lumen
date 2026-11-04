@@ -1,7 +1,7 @@
 import { generateText, streamText, Output, type ModelMessage } from 'ai';
 import type { z } from 'zod';
 import type { AgentId, Effort } from '../../shared/events.js';
-import { modelFor, type Role } from './registry.js';
+import { modelFor, modelSpec, type Role } from './registry.js';
 
 export const EFFORT: Record<
   Effort,
@@ -11,6 +11,18 @@ export const EFFORT: Record<
   medium: { reasoning: 'low', maxOutputTokens: 900, lengthHint: 'Reply in a short paragraph.' },
   high: { reasoning: 'medium', maxOutputTokens: 3000, lengthHint: 'Give a thorough answer.' },
 };
+
+type Reasoning = 'none' | 'low' | 'medium';
+
+/**
+ * The reasoning effort to send, or undefined to send none: OpenAI-compatible
+ * endpoints (`compat:`) may reject reasoning_effort, and MODEL_REASONING=off
+ * turns it off everywhere.
+ */
+export function reasoningFor(spec: string, effort: Reasoning): Reasoning | undefined {
+  if (spec.startsWith('compat:') || process.env.MODEL_REASONING === 'off') return undefined;
+  return effort;
+}
 
 export interface ReqMeta {
   kind: 'reply' | 'gate' | 'dedup' | 'classify' | 'continue' | 'replace' | 'judge';
@@ -75,12 +87,13 @@ export async function* streamChat(a: {
   };
   const total = setTimeout(expire('total', totalMs), totalMs);
   let idle = setTimeout(expire('idle', idleMs), idleMs);
+  const reasoning = reasoningFor(modelSpec(a.role, a.agentId), e.reasoning);
   const result = streamText({
     model: modelFor(a.role, a.agentId),
     system: a.system,
     messages: a.messages,
     abortSignal: AbortSignal.any([a.signal, timeout.signal]),
-    reasoning: e.reasoning,
+    ...(reasoning ? { reasoning } : {}),
     maxOutputTokens: e.maxOutputTokens,
     headers: metaHeaders(a.meta),
     maxRetries: 0,

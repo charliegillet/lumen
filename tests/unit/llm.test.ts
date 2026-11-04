@@ -1,10 +1,10 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import { modelFor, modelSpec } from '../../src/server/llm/registry.js';
-import { generateStructured, streamChat } from '../../src/server/llm/stream.js';
+import { generateStructured, reasoningFor, streamChat } from '../../src/server/llm/stream.js';
 import { fakeRequests, resetFake, setFakeScript } from '../../src/server/llm/fake.js';
 
-const ENV = ['MODEL_AGENT', 'MODEL_AGENT_MAYA', 'MODEL_GATE', 'MODEL_CLASSIFIER', 'MODEL_JUDGE'];
+const ENV = ['MODEL_AGENT', 'MODEL_AGENT_MAYA', 'MODEL_GATE', 'MODEL_CLASSIFIER', 'MODEL_JUDGE', 'MODEL_REASONING'];
 beforeEach(() => {
   for (const k of ENV) delete process.env[k];
   resetFake();
@@ -117,5 +117,25 @@ describe('fake provider', () => {
       })(),
     ).rejects.toThrow(/429/);
     expect(got).toHaveLength(2);
+  });
+});
+
+describe('reasoning', () => {
+  it('is omitted for compat endpoints and when MODEL_REASONING=off', () => {
+    expect(reasoningFor('openai:gpt-5.6-luna', 'low')).toBe('low');
+    expect(reasoningFor('fake:x', 'none')).toBe('none');
+    expect(reasoningFor('compat:llama3', 'medium')).toBeUndefined();
+    process.env.MODEL_REASONING = 'off';
+    expect(reasoningFor('openai:gpt-5.6-luna', 'low')).toBeUndefined();
+  });
+
+  it('streamChat sends the effort reasoning unless turned off', async () => {
+    process.env.MODEL_AGENT = 'fake:x';
+    setFakeScript(() => ({ chunks: ['x'], delayMs: 0 }));
+    for await (const _ of streamChat({ ...base(), effort: 'medium' })) void _;
+    expect(fakeRequests[0]?.reasoning).toBe('low');
+    process.env.MODEL_REASONING = 'off';
+    for await (const _ of streamChat({ ...base(), effort: 'medium' })) void _;
+    expect(fakeRequests[1]?.reasoning ?? 'provider-default').toBe('provider-default');
   });
 });
