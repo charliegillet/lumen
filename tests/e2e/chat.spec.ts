@@ -65,6 +65,34 @@ test('three agents stream concurrently', async ({ page }) => {
   await expectNoMechanismWords(page);
 });
 
+test('typing dots show for agents that started, then give way to their words', async ({ page }) => {
+  await open(page);
+  // Record every typing-dots bubble that is ever added, and for whom.
+  await page.evaluate(() => {
+    const seen: string[] = [];
+    (window as unknown as { dotsSeen: string[] }).dotsSeen = seen;
+    new MutationObserver((records) => {
+      for (const r of records) {
+        for (const n of r.addedNodes) {
+          if (!(n instanceof HTMLElement)) continue;
+          const dots = n.matches('.bubble-typing') ? [n] : [...n.querySelectorAll<HTMLElement>('.bubble-typing')];
+          // The label is the only content: no visible text inside the dots.
+          for (const d of dots) seen.push(`${d.getAttribute('aria-label') ?? ''}${d.textContent ?? ''}`);
+        }
+      }
+    }).observe(document.body, { childList: true, subtree: true });
+  });
+  await say(page, 'what should we do about pricing?');
+  await allStreaming(page);
+  await expect(stopBtn(page)).toBeHidden({ timeout: 30_000 });
+  // Each speaker showed dots exactly once; the follow-up gates declined, and those agents never flashed dots.
+  const seen = await page.evaluate(() => (window as unknown as { dotsSeen: string[] }).dotsSeen);
+  expect([...seen].sort()).toEqual(['Maya is typing', 'Priya is typing', 'Theo is typing']);
+  await expect(page.locator('.bubble-typing')).toHaveCount(0);
+  for (const label of seen) expect(label).not.toMatch(MECHANISM);
+  await expectNoMechanismWords(page);
+});
+
 test('steer by name mid-stream', async ({ page }) => {
   await open(page);
   await say(page, LONG);
