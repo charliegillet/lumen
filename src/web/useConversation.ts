@@ -206,7 +206,10 @@ export function revealPending(s: ClientState): boolean {
   for (const [id, r] of s.reveal) {
     if (s.frozen.has(id)) continue;
     const m = s.view.messages.find((x) => x.id === id);
-    if (!m || r.shown < m.text.length || m.status !== 'streaming') return true;
+    if (!m || m.status !== 'streaming') return true; // ends (or is dropped) on the next frame
+    // Still streaming: only while a whole word (or an over-long one) is waiting.
+    // A half-arrived last word stalls until the next delta, which reschedules.
+    if (revealCut(m.text, r.shown, m.text.length, false) > r.shown) return true;
   }
   return false;
 }

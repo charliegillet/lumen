@@ -255,6 +255,17 @@ describe('typewriter reveal', () => {
     expect(shown(s, 'B')).toBe('New ');
   });
 
+  it('goes idle while the last word is still arriving', () => {
+    let s = frames(apply(animated(), deltaAt(4, 'A', 'hello wor', 0)), 20);
+    expect(shown(s, 'A')).toBe('hello ');
+    expect(revealPending(s)).toBe(false); // nothing to show until the word ends
+    s = apply(s, deltaAt(5, 'A', 'ld ', 9));
+    expect(revealPending(s)).toBe(true);
+    s = frames(s, 10);
+    expect(shown(s, 'A')).toBe('hello world ');
+    expect(revealPending(s)).toBe(false);
+  });
+
   it('held words from before a rewrite stay until the rewrite shows its first word', () => {
     let s = apply(animated(), deltaAt(4, 'B', 'Old answer ', 0));
     s = frames(s, 20);
