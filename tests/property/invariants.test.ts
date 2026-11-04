@@ -41,6 +41,9 @@ const CONV = 'p1';
 /** PROPERTY_RUNS=5000 npx vitest run tests/property for a longer hunt. */
 const RUNS = Number(process.env.PROPERTY_RUNS ?? 100);
 
+/** Coverage evidence, accumulated over every run from the event logs. */
+const cover = { stopWhileOpen: 0, steerMidStream: 0, reopen: 0 };
+
 interface Params {
   gate: Record<AgentId, boolean>;
   mentions: boolean;
@@ -296,7 +299,11 @@ function checkFinal(r: Real): void {
       case 'message_segment_started': {
         const l = life.get(e.messageId);
         expect(l, `${at}: segment for unknown message`).toBeDefined();
-        expect(e.segment, `${at}: segment not increasing`).toBeGreaterThan(l!.segment);
+        // Successor: the previous segment is either still open (closed by this
+        // one) or already closed by a terminal (reopen); numbering is exact.
+        expect(e.segment, `${at}: segment not previous+1`).toBe(l!.segment + 1);
+        if (l!.open) cover.steerMidStream++;
+        else cover.reopen++;
         l!.segment = e.segment;
         l!.open = true;
         l!.text = Math.min(l!.text, e.truncateTo);
@@ -325,6 +332,7 @@ function checkFinal(r: Real): void {
         break;
       }
       case 'stop_all':
+        if ([...life.values()].some((l) => l.open)) cover.stopWhileOpen++;
         for (const [id, l] of life) if (l.open) stoppedAt.set(id, l.segment);
         break;
       default:
@@ -383,16 +391,20 @@ const paramsArb: fc.Arbitrary<Params> = fc.record({
 });
 
 describe('ordering invariants (property)', () => {
+  const ENV_KEYS = ['MODEL_AGENT', 'MODEL_GATE', 'MODEL_CLASSIFIER'] as const;
+  const savedEnv: Record<string, string | undefined> = {};
   beforeEach(() => {
+    for (const k of ENV_KEYS) savedEnv[k] = process.env[k];
     process.env.MODEL_AGENT = 'fake:x';
     process.env.MODEL_GATE = 'fake:x';
     process.env.MODEL_CLASSIFIER = 'fake:x';
     vi.spyOn(console, 'warn').mockImplementation(() => {});
   });
   afterEach(() => {
-    delete process.env.MODEL_AGENT;
-    delete process.env.MODEL_GATE;
-    delete process.env.MODEL_CLASSIFIER;
+    for (const k of ENV_KEYS) {
+      if (savedEnv[k] === undefined) delete process.env[k];
+      else process.env[k] = savedEnv[k];
+    }
     hooks.before = null;
     resetFake();
     vi.useRealTimers();
@@ -429,5 +441,12 @@ describe('ordering invariants (property)', () => {
       ),
       { numRuns: RUNS },
     );
-  }, Math.max(120_000, RUNS * 100));
+    if (process.env.PROPERTY_VERBOSE) {
+      console.info(
+        `coverage: stop_all-while-open=${cover.stopWhileOpen} steer-mid-stream=${cover.steerMidStream} reopen=${cover.reopen}`,
+      );
+    }
+    expect(cover.stopWhileOpen, 'stop_all landed while a message was open').toBeGreaterThan(0);
+    expect(cover.steerMidStream, 'segment restarted while open').toBeGreaterThan(0);
+  }, Math.max(30_000, RUNS * 200));
 });
