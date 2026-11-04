@@ -94,10 +94,15 @@ export async function handleUserMessage(
  *
  * clientReqId convention: the Stop button sends its own id; a stop typed as
  * a chat message uses `msg:<clientMsgId>`, so retrying that send is idempotent too.
+ *
+ * `stampSeq` is the seq stop stamps record (default: the stop_all's own). A
+ * stop typed as a message passes that message's seq, so messages sent while
+ * it was being classified are not treated as stopped.
  */
 export function handleStop(
   actor: ConversationActor,
   i: { clientReqId: string; rendered: Record<string, number> },
+  stampSeq?: number,
 ): { seq: number | null } {
   const prior = actor.findStopAll(i.clientReqId);
   if (prior) return { seq: prior.seq };
@@ -106,9 +111,10 @@ export function handleStop(
   const turnActive = turn !== null && !turn.signal.aborted;
   if (live.length === 0 && !turnActive) return { seq: null };
   const ev = actor.append({ type: 'stop_all', clientReqId: i.clientReqId });
-  stops(actor).all = ev.seq;
+  const st = stops(actor);
+  st.all = Math.max(st.all, stampSeq ?? ev.seq);
   turn?.abort();
-  for (const g of live) stopAt(actor, g, i.rendered);
+  for (const g of live) stopAt(actor, g, i.rendered, stampSeq);
   return { seq: ev.seq };
 }
 
@@ -122,14 +128,19 @@ async function handle(actor: ConversationActor, userMessageId: string, userSeq: 
   let then = null as (() => Promise<void>) | null; // set inside decide()
 
   const decide = async (): Promise<void> => {
-    // 1. Regex stop: immediate, no classifier. A "stop" with nothing to stop
-    //    ("wait, what about pricing?") is an ordinary message.
+    // 1. Regex stop: immediate, no classifier. A bare stop also aborts a turn
+    //    that is still gating. A stop with nothing to stop is an ordinary message.
     if (regex.stop) {
       const all = regex.broadcast || regex.targets.length === 0;
       const hit = all ? liveAtSend : liveAtSend.filter((g) => regex.targets.includes(g.agentId));
+      const turn = actor.turnAbort;
+      if (all && hit.length === 0 && turn !== null && !turn.signal.aborted) {
+        handleStop(actor, { clientReqId: `msg:${i.clientMsgId}`, rendered: i.rendered }, userSeq);
+        return;
+      }
       if (hit.length > 0) {
-        if (all) handleStop(actor, { clientReqId: `msg:${i.clientMsgId}`, rendered: i.rendered });
-        else for (const g of hit) stopAt(actor, g, i.rendered);
+        if (all) handleStop(actor, { clientReqId: `msg:${i.clientMsgId}`, rendered: i.rendered }, userSeq);
+        else for (const g of hit) stopAt(actor, g, i.rendered, userSeq);
         targets.push(...uniq(hit.map((g) => g.agentId)));
         return;
       }
@@ -155,8 +166,8 @@ async function handle(actor: ConversationActor, userMessageId: string, userSeq: 
     if (d.kind === 'stop') {
       const live = [...actor.generations.values()];
       const hit = named.length > 0 ? live.filter((g) => named.includes(g.agentId)) : live;
-      if (named.length === 0) handleStop(actor, { clientReqId: `msg:${i.clientMsgId}`, rendered: i.rendered });
-      else for (const g of hit) stopAt(actor, g, i.rendered);
+      if (named.length === 0) handleStop(actor, { clientReqId: `msg:${i.clientMsgId}`, rendered: i.rendered }, userSeq);
+      else for (const g of hit) stopAt(actor, g, i.rendered, userSeq);
       targets.push(...uniq(hit.map((g) => g.agentId)));
       return;
     }
@@ -344,13 +355,15 @@ async function complies(steers: string[], text: string): Promise<boolean> {
 
 // ---------------------------------------------------------------------------
 
-function stopAt(actor: ConversationActor, g: Generation, rendered: Record<string, number>): void {
+/** `stampSeq` as in handleStop; defaults to the log head after the stop. */
+function stopAt(actor: ConversationActor, g: Generation, rendered: Record<string, number>, stampSeq?: number): void {
   try {
     g.stop(shown(rendered, g.messageId, g.textSoFar().length));
   } catch (err) {
     console.warn(`generation ${g.messageId}: stop failed`, err); // stop() still ends it
   } finally {
-    stops(actor).agent.set(g.agentId, actor.lastSeq);
+    const agent = stops(actor).agent;
+    agent.set(g.agentId, Math.max(agent.get(g.agentId) ?? 0, stampSeq ?? actor.lastSeq));
   }
 }
 

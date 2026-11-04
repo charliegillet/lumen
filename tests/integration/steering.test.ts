@@ -600,6 +600,52 @@ describe('stop', () => {
     expect(resolved().at(-1)).toMatchObject({ targets: ['theo'] });
   });
 
+  it.each([
+    ['a targeted stop', ['theo'] as AgentId[]],
+    ['a stop for everyone', [] as AgentId[]],
+  ])('%s decided by the classifier does not block a message sent while it classified', async (_name, targets) => {
+    const theo = start('theo');
+    await waitFor(() => theo.textSoFar().length > 0);
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    let classifies = 0;
+    hooks.before = (meta) => (meta.kind === 'classify' && ++classifies === 1 ? held : undefined);
+    s.classify = (text) => (text.includes('cut it') ? { ...NEW_MESSAGE, kind: 'stop', targets } : NEW_MESSAGE);
+
+    const a = await send('ok that is plenty, cut it');
+    const b = await send('Theo, what about pricing?'); // waits for Theo, then forces him
+    await waitFor(() => resolved().length === 1); // b decided; a still classifying
+    release();
+    await Promise.all([a.settled, b.settled]);
+    await idle();
+
+    expect(msg(theo.messageId)?.status).toBe('stopped');
+    const theos = startedBy('theo');
+    expect(theos).toHaveLength(2);
+    expect(theos[1]!.seq).toBeGreaterThan(b.seq);
+  });
+
+  it('a bare "stop" while the turn is still gating stops it without classifying', async () => {
+    let gating = 0;
+    hooks.before = (meta, signal) => {
+      if (meta.kind !== 'gate') return undefined;
+      gating++;
+      return hangUntilAbort(signal);
+    };
+    const r = await send('What should we do?');
+    await waitFor(() => gating === 3);
+    const ctrl = actor.turnAbort;
+    expect(ctrl).not.toBeNull();
+    const st = await send('stop');
+    await Promise.all([r.settled, st.settled]);
+    await sleep(100);
+    expect(ctrl?.signal.aborted).toBe(true);
+    expect(events().filter((e) => e.type === 'stop_all')).toHaveLength(1);
+    expect(fakeRequests.some((x) => x.kind === 'classify' && (x.prompt ?? '').endsWith('stop'))).toBe(false);
+    expect(events().some((e) => e.type === 'message_started')).toBe(false);
+    expect(gating).toBe(3); // no second turn
+  });
+
   it('a pending reply does not start after a stop', async () => {
     const theo = start('theo');
     await waitFor(() => theo.textSoFar().length > 0);
