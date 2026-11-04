@@ -14,7 +14,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/charliegillet/emanate-takehome.git"
+    "url": "git+https://github.com/charliegillet/lumen.git"
   },
   "type": "module",
   "private": true,
