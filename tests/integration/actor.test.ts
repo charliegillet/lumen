@@ -146,4 +146,22 @@ describe('ConversationActor', () => {
     const e: ConvEvent = a.append({ type: 'stop_all', clientReqId: 'r' });
     expect(e.seq).toBe(1);
   });
+
+  it('delivers strictly increasing seqs when a subscriber appends re-entrantly', () => {
+    const db = tempDb();
+    const a = new ConversationActor(db, 'c');
+    const first: number[] = [];
+    const second: number[] = [];
+    a.subscribe((e) => {
+      first.push(e.seq);
+      if (e.type === 'user_message') a.append({ type: 'stop_all', clientReqId: 'from-sub' });
+    });
+    a.subscribe((e) => second.push(e.seq));
+    a.append({ type: 'user_message', messageId: 'u1', clientMsgId: 'c1', text: 'hi' });
+    a.append({ type: 'stop_all', clientReqId: 'r2' });
+    expect(first).toEqual([1, 2, 3]);
+    expect(second).toEqual([1, 2, 3]);
+    expect(a.lastSeq).toBe(3);
+    expect(a.view.lastSeq).toBe(3);
+  });
 });

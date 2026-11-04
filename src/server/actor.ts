@@ -22,6 +22,8 @@ export class ConversationActor {
   private _lastSeq = 0;
   private _view: ConversationView;
   private readonly subscribers = new Set<(e: ConvEvent) => void>();
+  private readonly pending: ConvEvent[] = [];
+  private draining = false;
   private readonly insertStmt;
   private readonly afterStmt;
   private readonly upToStmt;
@@ -80,16 +82,32 @@ export class ConversationActor {
     this.insertStmt.run(this.id, seq, body.type, JSON.stringify(body), at);
     // Only reached on successful insert.
     const event = { ...body, seq, conversationId: this.id, at } as ConvEvent;
-    this._lastSeq = seq;
     this._view = applyEvent(this._view, event);
-    for (const fn of [...this.subscribers]) {
-      try {
-        fn(event);
-      } catch (err) {
-        console.error('ConversationActor subscriber threw', err);
-      }
-    }
+    this._lastSeq = seq;
+    this.pending.push(event);
+    if (!this.draining) this.drain();
     return event;
+  }
+
+  /**
+   * Deliver queued events in seq order. A subscriber that appends re-entrantly only
+   * enqueues; the outer drain delivers it after every subscriber has seen the current one.
+   */
+  private drain(): void {
+    this.draining = true;
+    try {
+      for (let event = this.pending.shift(); event; event = this.pending.shift()) {
+        for (const fn of [...this.subscribers]) {
+          try {
+            fn(event);
+          } catch (err) {
+            console.error('ConversationActor subscriber threw', err);
+          }
+        }
+      }
+    } finally {
+      this.draining = false;
+    }
   }
 
   eventsAfter(seq: number): ConvEvent[] {
