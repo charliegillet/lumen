@@ -64,6 +64,8 @@ function unresolved(a: ConversationActor): Map<string, number> {
   if (!m) unresolvedOf.set(a, (m = new Map()));
   return m;
 }
+/** Is a user message sent before `seq` still undecided? */
+const undecidedBefore = (a: ConversationActor, seq: number) => [...unresolved(a).values()].some((s) => s < seq);
 
 /**
  * Records the human's message, then (asynchronously, in `settled`) decides
@@ -88,9 +90,11 @@ export async function handleUserMessage(
 
 /**
  * Stops every live generation at what the client displayed and aborts the
- * running turn (including one still gating, before anyone speaks).
+ * running turn (including one still gating, before anyone speaks). A user
+ * message still being decided counts as work too: the stop stamp makes its
+ * queued reply give up once the classifier answers.
  * Idempotent per clientReqId. Appends nothing and returns seq null only when
- * nothing is live and no turn is active.
+ * nothing is live, no turn is active and no earlier message is undecided.
  *
  * clientReqId convention: the Stop button sends its own id; a stop typed as
  * a chat message uses `msg:<clientMsgId>`, so retrying that send is idempotent too.
@@ -109,7 +113,7 @@ export function handleStop(
   const live = [...actor.generations.values()];
   const turn = actor.turnAbort;
   const turnActive = turn !== null && !turn.signal.aborted;
-  if (live.length === 0 && !turnActive) return { seq: null };
+  if (live.length === 0 && !turnActive && !undecidedBefore(actor, stampSeq ?? Infinity)) return { seq: null };
   const ev = actor.append({ type: 'stop_all', clientReqId: i.clientReqId });
   const st = stops(actor);
   st.all = Math.max(st.all, stampSeq ?? ev.seq);
@@ -129,12 +133,14 @@ async function handle(actor: ConversationActor, userMessageId: string, userSeq: 
 
   const decide = async (): Promise<void> => {
     // 1. Regex stop: immediate, no classifier. A bare stop also aborts a turn
-    //    that is still gating. A stop with nothing to stop is an ordinary message.
+    //    that is still gating and earlier messages still being decided. A stop
+    //    with nothing to stop is an ordinary message.
     if (regex.stop) {
       const all = regex.broadcast || regex.targets.length === 0;
       const hit = all ? liveAtSend : liveAtSend.filter((g) => regex.targets.includes(g.agentId));
       const turn = actor.turnAbort;
-      if (all && hit.length === 0 && turn !== null && !turn.signal.aborted) {
+      const busy = (turn !== null && !turn.signal.aborted) || undecidedBefore(actor, userSeq);
+      if (all && hit.length === 0 && busy) {
         handleStop(actor, { clientReqId: `msg:${i.clientMsgId}`, rendered: i.rendered }, userSeq);
         return;
       }

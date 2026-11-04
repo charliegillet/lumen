@@ -1,9 +1,11 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { AgentId, ConvEvent, EventBody } from '../../src/shared/events.js';
 import { emptyView, GapError, type MessageView } from '../../src/shared/reducer.js';
 import {
   ackPending,
   addPending,
+  AWAIT_CAP_MS,
+  canStop,
   displayedText,
   failPending,
   freezeAll,
@@ -13,6 +15,8 @@ import {
   renderedCounts,
   SAFETY_UNFREEZE_MS,
   shownMessages,
+  STOP_GRACE_MS,
+  stopExpiresIn,
   unfreeze,
   withSnapshot,
   type ClientState,
@@ -238,5 +242,68 @@ describe('client conversation state', () => {
     expect([...s.frozen.keys()]).toEqual(['B']);
     expect(shown(s, 'B')).toBe('Theo says');
     expect(shown(s, 'A')).toBe('Maya says more');
+  });
+});
+
+describe('canStop', () => {
+  afterEach(() => vi.useRealTimers());
+  const at = (t: number) => vi.setSystemTime(t);
+  const stopAll = (seq: number) => ev(seq, { type: 'stop_all', clientReqId: 'r' });
+
+  it('is offered from an own send until its steer_resolved, before anyone streams', () => {
+    vi.useFakeTimers();
+    at(10_000);
+    let s = addPending(initialState(), 'cm-a', 'Will we keep Northwind?');
+    expect(canStop(s, Date.now())).toBe(true);
+    s = apply(s, user(1, 'ua', 'cm-a'));
+    at(12_000);
+    expect(canStop(s, Date.now())).toBe(true); // still being classified
+    s = apply(s, resolved(2, 'ua', []));
+    expect(s.awaiting.size).toBe(0);
+    expect(canStop(s, Date.now())).toBe(true); // the turn may still be gating
+    expect(canStop(s, Date.now() + STOP_GRACE_MS)).toBe(false);
+  });
+
+  it('is offered while streaming and for a short grace after the last message ended', () => {
+    vi.useFakeTimers();
+    at(1_000);
+    let s = apply(initialState(), user(1, 'u1'), started(2, 'A', 'maya'), delta(3, 'A', 'hi'));
+    expect(canStop(s, Date.now())).toBe(true);
+    expect(stopExpiresIn(s, Date.now())).toBeNull();
+    at(5_000);
+    s = apply(s, completed(4, 'A'));
+    expect(canStop(s, 5_000 + STOP_GRACE_MS - 1)).toBe(true); // a hop-1 gate may be in flight
+    expect(stopExpiresIn(s, 5_000)).toBe(STOP_GRACE_MS);
+    expect(canStop(s, 5_000 + STOP_GRACE_MS)).toBe(false);
+    expect(stopExpiresIn(s, 5_000 + STOP_GRACE_MS)).toBeNull();
+  });
+
+  it('is not offered for someone else\'s message or for nothing at all', () => {
+    vi.useFakeTimers();
+    at(1_000);
+    expect(canStop(initialState(), Date.now())).toBe(false);
+    const s = apply(initialState(), user(1, 'u1', 'cm-other'));
+    expect(canStop(s, Date.now())).toBe(false);
+  });
+
+  it('a stop_all ends the grace and drops pending own sends', () => {
+    vi.useFakeTimers();
+    at(1_000);
+    let s = addPending(initialState(), 'cm-a', 'hello');
+    s = apply(s, user(1, 'ua', 'cm-a'), stopAll(2));
+    expect(canStop(s, Date.now())).toBe(false);
+    s = apply(s, resolved(3, 'ua', [])); // resolved after the stop: no new grace
+    expect(canStop(s, Date.now())).toBe(false);
+  });
+
+  it('an undelivered send is not pending work; a retry is', () => {
+    vi.useFakeTimers();
+    at(1_000);
+    let s = failPending(addPending(initialState(), 'cm-a', 'hello'), 'cm-a', true);
+    expect(canStop(s, Date.now())).toBe(false);
+    at(50_000);
+    s = failPending(s, 'cm-a', false);
+    expect(canStop(s, Date.now())).toBe(true);
+    expect(canStop(s, Date.now() + AWAIT_CAP_MS)).toBe(false); // never stuck on a lost steer_resolved
   });
 });

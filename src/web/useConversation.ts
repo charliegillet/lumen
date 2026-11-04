@@ -28,6 +28,12 @@ export interface ClientState {
   /** messageId -> words kept on screen while a rewrite has produced nothing yet. */
   held: Map<string, string>;
   pendingSends: PendingSend[];
+  /** Own sends (clientMsgId -> client time sent) whose steer_resolved has not arrived. */
+  awaiting: Map<string, number>;
+  /** Client time of the last agent completion or own steer_resolved; null once stopped. */
+  lastWorkAt: number | null;
+  /** Seq of the latest stop_all seen. */
+  lastStopSeq: number;
 }
 
 export type ShownMessage = MessageView & { key: string; pending: boolean; failed: boolean };
@@ -38,9 +44,44 @@ export type ShownMessage = MessageView & { key: string; pending: boolean; failed
  * buffered words that the steer then cuts back.
  */
 export const SAFETY_UNFREEZE_MS = 7000;
+/** Stop stays offered this long after work ends: the next wave may still be gating. */
+export const STOP_GRACE_MS = 3000;
+/** An own send counts as pending work at most this long (classifier cap plus a gate). */
+export const AWAIT_CAP_MS = 15_000;
 
 export function initialState(view: ConversationView = emptyView): ClientState {
-  return { view, frozen: new Map(), held: new Map(), pendingSends: [] };
+  return {
+    view,
+    frozen: new Map(),
+    held: new Map(),
+    pendingSends: [],
+    awaiting: new Map(),
+    lastWorkAt: null,
+    lastStopSeq: 0,
+  };
+}
+
+const failedSend = (s: ClientState, clientMsgId: string) =>
+  s.pendingSends.some((p) => p.clientMsgId === clientMsgId && p.failed);
+
+/**
+ * Is there anything Stop could act on? Something streaming, an own send the
+ * server is still deciding, or work that ended moments ago (the next wave may
+ * be gating, before anyone visibly writes). The server is idempotent either way.
+ */
+export function canStop(s: ClientState, now: number): boolean {
+  if (streamingAgents(s).length > 0) return true;
+  for (const [id, at] of s.awaiting) if (now - at < AWAIT_CAP_MS && !failedSend(s, id)) return true;
+  return s.lastWorkAt !== null && now - s.lastWorkAt < STOP_GRACE_MS;
+}
+
+/** Ms until canStop may turn false by time alone, or null when no timer is needed. */
+export function stopExpiresIn(s: ClientState, now: number): number | null {
+  if (streamingAgents(s).length > 0) return null;
+  const ends = [...s.awaiting].filter(([id]) => !failedSend(s, id)).map(([, at]) => at + AWAIT_CAP_MS);
+  if (s.lastWorkAt !== null) ends.push(s.lastWorkAt + STOP_GRACE_MS);
+  const left = ends.map((t) => t - now).filter((ms) => ms > 0);
+  return left.length > 0 ? Math.min(...left) : null;
 }
 
 export function displayedText(s: ClientState, m: MessageView): string {
@@ -92,7 +133,7 @@ function without<V>(map: Map<string, V>, id: string): Map<string, V> {
   return next;
 }
 
-/** Applies one server event. Throws GapError when events were missed. */
+/** Applies one server event. Throws GapError when events were missed. Reads the clock for canStop. */
 export function onEvent(s: ClientState, e: ConvEvent): ClientState {
   const view = applyEvent(s.view, e);
   if (view === s.view) return s; // replayed event
@@ -106,7 +147,17 @@ export function onEvent(s: ClientState, e: ConvEvent): ClientState {
       const ids = view.messages
         .filter((m) => s.frozen.has(m.id) && !(m.author.kind === 'agent' && e.targets.includes(m.author.agentId)))
         .map((m) => m.id);
-      return unfreeze(next, ids);
+      const u = view.messages.find((m) => m.id === e.userMessageId);
+      const own = u?.clientMsgId !== undefined && s.awaiting.has(u.clientMsgId);
+      if (!own) return unfreeze(next, ids);
+      return unfreeze(
+        {
+          ...next,
+          awaiting: without(s.awaiting, u.clientMsgId!),
+          lastWorkAt: u.startSeq > s.lastStopSeq ? Date.now() : s.lastWorkAt,
+        },
+        ids,
+      );
     }
     case 'message_segment_started': {
       let held = without(s.held, e.messageId);
@@ -126,11 +177,13 @@ export function onEvent(s: ClientState, e: ConvEvent): ClientState {
       return next;
     }
     case 'message_completed':
+      return { ...next, frozen: without(s.frozen, e.messageId), held: without(s.held, e.messageId), lastWorkAt: Date.now() };
     case 'message_aborted':
       return { ...next, frozen: without(s.frozen, e.messageId), held: without(s.held, e.messageId) };
     case 'stop_all':
       // The aborts that follow carry the final text; hold everything until they land.
-      return freezeAll(next);
+      // Sends before it are stopped too, so they no longer count as pending work.
+      return freezeAll({ ...next, awaiting: new Map(), lastWorkAt: null, lastStopSeq: e.seq });
     default:
       return next;
   }
@@ -146,7 +199,11 @@ export function renderedCounts(s: ClientState): Record<string, number> {
 }
 
 export function addPending(s: ClientState, clientMsgId: string, text: string): ClientState {
-  return { ...s, pendingSends: [...s.pendingSends, { clientMsgId, text, seq: null, failed: false }] };
+  return {
+    ...s,
+    pendingSends: [...s.pendingSends, { clientMsgId, text, seq: null, failed: false }],
+    awaiting: new Map(s.awaiting).set(clientMsgId, Date.now()),
+  };
 }
 
 /** The POST answered with the user_message's seq. */
@@ -161,9 +218,11 @@ export function ackPending(s: ClientState, clientMsgId: string, seq: number): Cl
   };
 }
 
+/** Marks a send failed, or (failed=false) as being retried now. */
 export function failPending(s: ClientState, clientMsgId: string, failed: boolean): ClientState {
   return {
     ...s,
+    awaiting: failed ? s.awaiting : new Map(s.awaiting).set(clientMsgId, Date.now()),
     pendingSends: s.pendingSends.map((p) => (p.clientMsgId === clientMsgId ? { ...p, failed } : p)),
   };
 }
@@ -243,6 +302,8 @@ export interface Conversation {
   retry(clientMsgId: string): void;
   stop(): void;
   anyStreaming: boolean;
+  /** Stop has something to act on (see canStop). */
+  canStop: boolean;
   loaded: boolean;
 }
 
@@ -415,9 +476,10 @@ export function useConversation(id: string): Conversation {
     [post, update],
   );
 
+  // Always posts: the server knows about work the client cannot see yet
+  // (a send still being classified, a gate in flight) and is idempotent.
   const stop = useCallback(() => {
     const before = latest.current;
-    if (!before.view.messages.some((m) => m.status === 'streaming')) return;
     const after = update(freezeAll, true);
     postJson(`${base}/stop`, { clientReqId: uuid(), rendered: renderedCounts(after) }).catch(() => {
       update((s) => unfreeze(s, [...after.frozen.keys()].filter((k) => !before.frozen.has(k))));
@@ -427,6 +489,15 @@ export function useConversation(id: string): Conversation {
   const messages = useMemo(() => shownMessages(state), [state]);
   const displayed = useCallback((m: MessageView) => displayedText(state, m), [state]);
   const anyStreaming = useMemo(() => state.view.messages.some((m) => m.status === 'streaming'), [state]);
+  // canStop also turns false by time alone: re-render when its window ends.
+  const [tick, setTick] = useState(0);
+  const stopNow = useMemo(() => canStop(state, Date.now()), [state, tick]);
+  useEffect(() => {
+    const ms = stopExpiresIn(state, Date.now());
+    if (ms === null) return;
+    const t = setTimeout(() => setTick((x) => x + 1), ms + 20);
+    return () => clearTimeout(t);
+  }, [state, tick]);
 
-  return { messages, displayed, send, retry, stop, anyStreaming, loaded };
+  return { messages, displayed, send, retry, stop, anyStreaming, canStop: stopNow, loaded };
 }

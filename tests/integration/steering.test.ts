@@ -646,6 +646,60 @@ describe('stop', () => {
     expect(gating).toBe(3); // no second turn
   });
 
+  it('stop right after a send, while it is still classified: nobody ever starts', async () => {
+    s.gate = () => true;
+    hooks.before = (meta) => (meta.kind === 'classify' ? sleep(150) : undefined);
+    const r = await send('Will we keep Northwind?');
+    const st = handleStop(actor, { clientReqId: 'stop-early', rendered: {} });
+    expect(st.seq).not.toBeNull();
+    expect(events().find((e) => e.seq === st.seq)?.type).toBe('stop_all');
+    expect(handleStop(actor, { clientReqId: 'stop-early', rendered: {} })).toEqual(st); // idempotent
+    await r.settled;
+    await sleep(100);
+    expect(resolved()).toHaveLength(1);
+    expect(events().some((e) => e.type === 'message_started')).toBe(false);
+    expect(fakeRequests.some((x) => x.kind === 'gate')).toBe(false);
+    // Decided and nothing running: nothing to stop.
+    expect(handleStop(actor, { clientReqId: 'stop-late', rendered: {} })).toEqual({ seq: null });
+  });
+
+  it('a typed "stop" while an earlier message is classified stops it too', async () => {
+    s.gate = () => true;
+    let release!: () => void;
+    hooks.before = (meta) => (meta.kind === 'classify' ? new Promise<void>((r) => (release = r)) : undefined);
+    const a = await send('Will we keep Northwind?');
+    const b = await send('stop');
+    await b.settled;
+    expect(events().filter((e) => e.type === 'stop_all')).toHaveLength(1);
+    release();
+    await a.settled;
+    await sleep(100);
+    expect(events().some((e) => e.type === 'message_started')).toBe(false);
+  });
+
+  it('stop between waves, while a hop-1 gate is in flight: no new message starts', async () => {
+    let hop1Gates = 0;
+    s.gate = (id, prompt) => id === 'maya' && prompt.includes('0 replies deep');
+    hooks.before = (meta, signal) => {
+      if (meta.kind !== 'gate' || fakeRequests.filter((x) => x.kind === 'reply').length === 0) return undefined;
+      hop1Gates++;
+      return hangUntilAbort(signal);
+    };
+    const r = await send('What should we do?');
+    await waitFor(() => hop1Gates > 0);
+    expect(actor.generations.size).toBe(0);
+    const startedBefore = events().filter((e) => e.type === 'message_started').length;
+    expect(startedBefore).toBe(1);
+    const ctrl = actor.turnAbort;
+    expect(ctrl).not.toBeNull();
+    const st = handleStop(actor, { clientReqId: 'stop-h1', rendered: {} });
+    expect(st.seq).not.toBeNull();
+    expect(ctrl?.signal.aborted).toBe(true);
+    await r.settled;
+    await sleep(100);
+    expect(events().filter((e) => e.type === 'message_started')).toHaveLength(startedBefore);
+  });
+
   it('a pending reply does not start after a stop', async () => {
     const theo = start('theo');
     await waitFor(() => theo.textSoFar().length > 0);

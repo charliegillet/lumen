@@ -87,14 +87,14 @@ function Welcome() {
 }
 
 export function App({ conversationId }: { conversationId: string }) {
-  const { messages, displayed, send, retry, stop, anyStreaming, loaded } = useConversation(conversationId);
+  const { messages, displayed, send, retry, stop, canStop, loaded } = useConversation(conversationId);
   const composer = useRef<ComposerHandle>(null);
   const { ref: scroller, atBottom, toBottom } = useStickToBottom<HTMLDivElement>(messages);
 
   // Esc stops everyone, unless focus is somewhere else that may want Esc.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key !== 'Escape' || e.defaultPrevented || !anyStreaming) return;
+      if (e.key !== 'Escape' || e.defaultPrevented || !canStop) return;
       const el = document.activeElement;
       const free = !el || el === document.body || el.closest('.composer') !== null;
       if (!free) return;
@@ -103,7 +103,7 @@ export function App({ conversationId }: { conversationId: string }) {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [anyStreaming, stop]);
+  }, [canStop, stop]);
 
   const onSend = useCallback(
     (text: string, typingStartedAt: number | null) => {
@@ -152,7 +152,7 @@ export function App({ conversationId }: { conversationId: string }) {
             </svg>
           </button>
         )}
-        <Composer ref={composer} onSend={onSend} onStop={stop} canStop={anyStreaming} />
+        <Composer ref={composer} onSend={onSend} onStop={stop} canStop={canStop} />
       </div>
     </div>
   );
