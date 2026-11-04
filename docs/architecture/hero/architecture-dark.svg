@@ -1,0 +1,235 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1836 936" width="1836" height="936" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, system-ui, Helvetica, Arial, sans-serif" role="img" aria-labelledby="t d">
+<title id="t">Lumen group chat architecture</title>
+<desc id="d">Left to right: the React browser client sends messages and stops to a Hono API as idempotent POSTs. The API appends each user message to an append-only SQLite event log through a single writer that assigns a gap-free seq, then hands every message to steering. Steering resolves @Name targets and bare stops with a regex, asks an LLM classifier whether a message is a steer or a new message, and aborts and restarts a targeted agent's segment. New messages start a turn in the orchestrator, where each agent bids from its own private notes, duplicates are dropped and replies stream in waves within message and hop budgets. Models are resolved from env strings by the Vercel AI SDK registry: OpenAI gpt-5.6-luna, or a scripted fake for tests. Token deltas are appended to the log and streamed back to the browser over resumable SSE ordered by seq. A tests band shows unit, integration, property, end-to-end and real-model eval layers.</desc>
+<defs><filter id="sh" x="-10%" y="-10%" width="120%" height="130%"><feDropShadow dx="0" dy="2" stdDeviation="4" flood-color="#0F172A" flood-opacity="0.45"/></filter>
+<marker id="ar" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M1 1L9 5L1 9z" fill="#8B949E"/></marker>
+<marker id="arE" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M1 1L9 5L1 9z" fill="#A371F7"/></marker></defs>
+<rect width="1836" height="936" fill="#0D1117"/>
+<text x="40" y="58" font-size="30" font-weight="750" fill="#E6EDF3">Lumen group chat</text>
+<text x="40" y="88" font-size="16" fill="#9DA7B3">One person, three agents, one conversation — steerable mid-sentence, ordered by construction.</text>
+<rect x="40" y="150" width="222" height="482" rx="20" fill="#0E2129" stroke="#1C4655"/>
+<rect x="56" y="166" width="137" height="30" rx="15" fill="#61DAFB"/>
+<text x="124.5" y="186" font-size="14" font-weight="700" fill="#0B1F2A" text-anchor="middle">React 19 · Vite</text>
+<text x="56" y="230" font-size="19" font-weight="700" fill="#E6EDF3">Browser</text>
+<text x="56" y="252" font-size="13.5" fill="#9DA7B3">What the person sees</text>
+<clipPath id="c0"><rect x="54" y="280" width="194" height="100" rx="14"/></clipPath>
+<rect x="54" y="280" width="194" height="100" rx="14" fill="#161B22" stroke="#30363D" filter="url(#sh)"/>
+<rect x="54" y="280" width="5" height="100" fill="#61DAFB" clip-path="url(#c0)"/>
+<text x="72" y="309" font-size="15" font-weight="650" fill="#E6EDF3">Group chat UI</text>
+<text x="72" y="332" font-size="13" fill="#9DA7B3">Bubbles stream side by</text>
+<text x="72" y="351" font-size="13" fill="#9DA7B3">side; no internals shown</text>
+<clipPath id="c1"><rect x="54" y="396" width="194" height="100" rx="14"/></clipPath>
+<rect x="54" y="396" width="194" height="100" rx="14" fill="#161B22" stroke="#30363D" filter="url(#sh)"/>
+<rect x="54" y="396" width="5" height="100" fill="#61DAFB" clip-path="url(#c1)"/>
+<text x="72" y="425" font-size="15" font-weight="650" fill="#E6EDF3">Instant freeze</text>
+<text x="72" y="448" font-size="13" fill="#9DA7B3">A targeted bubble freezes</text>
+<text x="72" y="467" font-size="13" fill="#9DA7B3">on send, before any</text>
+<text x="72" y="486" font-size="13" fill="#9DA7B3">round trip</text>
+<clipPath id="c2"><rect x="54" y="512" width="194" height="100" rx="14"/></clipPath>
+<rect x="54" y="512" width="194" height="100" rx="14" fill="#161B22" stroke="#30363D" filter="url(#sh)"/>
+<rect x="54" y="512" width="5" height="100" fill="#61DAFB" clip-path="url(#c2)"/>
+<text x="72" y="541" font-size="15" font-weight="650" fill="#E6EDF3">Pure reducer</text>
+<text x="72" y="564" font-size="13" fill="#9DA7B3">Renders a fold of</text>
+<text x="72" y="583" font-size="13" fill="#9DA7B3">seq-ordered events;</text>
+<text x="72" y="602" font-size="13" fill="#9DA7B3">resumes after its last seq</text>
+<rect x="346" y="150" width="222" height="482" rx="20" fill="#24170D" stroke="#5A3317"/>
+<rect x="362" y="166" width="130" height="30" rx="15" fill="#E36002"/>
+<text x="427" y="186" font-size="14" font-weight="700" fill="#FFFFFF" text-anchor="middle">Hono · Node 22</text>
+<text x="362" y="230" font-size="19" font-weight="700" fill="#E6EDF3">API</text>
+<text x="362" y="252" font-size="13.5" fill="#9DA7B3">Commands in, events out</text>
+<clipPath id="c3"><rect x="360" y="280" width="194" height="100" rx="14"/></clipPath>
+<rect x="360" y="280" width="194" height="100" rx="14" fill="#161B22" stroke="#30363D" filter="url(#sh)"/>
+<rect x="360" y="280" width="5" height="100" fill="#F07A2A" clip-path="url(#c3)"/>
+<text x="378" y="309" font-size="15" font-weight="650" fill="#E6EDF3">Commands</text>
+<text x="378" y="332" font-size="13" fill="#9DA7B3">Idempotent POSTs keyed</text>
+<text x="378" y="351" font-size="13" fill="#9DA7B3">by client-generated ids</text>
+<clipPath id="c4"><rect x="360" y="396" width="194" height="100" rx="14"/></clipPath>
+<rect x="360" y="396" width="194" height="100" rx="14" fill="#161B22" stroke="#30363D" filter="url(#sh)"/>
+<rect x="360" y="396" width="5" height="100" fill="#F07A2A" clip-path="url(#c4)"/>
+<text x="378" y="425" font-size="15" font-weight="650" fill="#E6EDF3">Resumable SSE</text>
+<text x="378" y="448" font-size="13" fill="#9DA7B3">Replays after seq, then</text>
+<text x="378" y="467" font-size="13" fill="#9DA7B3">goes live; 20 s ping</text>
+<rect x="652" y="150" width="222" height="482" rx="20" fill="#0D1D27" stroke="#1F4257"/>
+<rect x="668" y="166" width="111" height="30" rx="15" fill="#0F6E95"/>
+<text x="723.5" y="186" font-size="14" font-weight="700" fill="#FFFFFF" text-anchor="middle">SQLite WAL</text>
+<text x="668" y="230" font-size="19" font-weight="700" fill="#E6EDF3">Event log</text>
+<text x="668" y="252" font-size="13.5" fill="#9DA7B3">One ordered source of truth</text>
+<clipPath id="c5"><rect x="666" y="280" width="194" height="100" rx="14"/></clipPath>
+<rect x="666" y="280" width="194" height="100" rx="14" fill="#161B22" stroke="#30363D" filter="url(#sh)"/>
+<rect x="666" y="280" width="5" height="100" fill="#3A9CC4" clip-path="url(#c5)"/>
+<text x="684" y="309" font-size="15" font-weight="650" fill="#E6EDF3">Single writer</text>
+<text x="684" y="332" font-size="13" fill="#9DA7B3">ConversationActor assigns</text>
+<text x="684" y="351" font-size="13" fill="#9DA7B3">gap-free seq; no await</text>
+<text x="684" y="370" font-size="13" fill="#9DA7B3">before the INSERT</text>
+<clipPath id="c6"><rect x="666" y="396" width="194" height="100" rx="14"/></clipPath>
+<rect x="666" y="396" width="194" height="100" rx="14" fill="#161B22" stroke="#30363D" filter="url(#sh)"/>
+<rect x="666" y="396" width="5" height="100" fill="#3A9CC4" clip-path="url(#c6)"/>
+<text x="684" y="425" font-size="15" font-weight="650" fill="#E6EDF3">Append-only events</text>
+<text x="684" y="448" font-size="13" fill="#9DA7B3">Bubbles order by start</text>
+<text x="684" y="467" font-size="13" fill="#9DA7B3">seq; reload is a replay</text>
+<clipPath id="c7"><rect x="666" y="512" width="194" height="100" rx="14"/></clipPath>
+<rect x="666" y="512" width="194" height="100" rx="14" fill="#161B22" stroke="#30363D" filter="url(#sh)"/>
+<rect x="666" y="512" width="5" height="100" fill="#3A9CC4" clip-path="url(#c7)"/>
+<text x="684" y="541" font-size="15" font-weight="650" fill="#E6EDF3">Standing instructions</text>
+<text x="684" y="564" font-size="13" fill="#9DA7B3">Rows in the log, rebuilt</text>
+<text x="684" y="583" font-size="13" fill="#9DA7B3">into every prompt</text>
+<rect x="958" y="150" width="222" height="482" rx="20" fill="#0F1B2C" stroke="#24416A"/>
+<rect x="974" y="166" width="109" height="30" rx="15" fill="#3178C6"/>
+<text x="1028.5" y="186" font-size="14" font-weight="700" fill="#FFFFFF" text-anchor="middle">TypeScript</text>
+<text x="974" y="230" font-size="19" font-weight="700" fill="#E6EDF3">Orchestrator</text>
+<text x="974" y="252" font-size="13.5" fill="#9DA7B3">Who speaks, and how much</text>
+<clipPath id="c8"><rect x="972" y="280" width="194" height="100" rx="14"/></clipPath>
+<rect x="972" y="280" width="194" height="100" rx="14" fill="#161B22" stroke="#30363D" filter="url(#sh)"/>
+<rect x="972" y="280" width="5" height="100" fill="#5B9BE6" clip-path="url(#c8)"/>
+<text x="990" y="309" font-size="15" font-weight="650" fill="#E6EDF3">Bid gate</text>
+<text x="990" y="332" font-size="13" fill="#9DA7B3">Each agent judges its own</text>
+<text x="990" y="351" font-size="13" fill="#9DA7B3">private notes: speak?</text>
+<text x="990" y="370" font-size="13" fill="#9DA7B3">With what effort?</text>
+<clipPath id="c9"><rect x="972" y="396" width="194" height="100" rx="14"/></clipPath>
+<rect x="972" y="396" width="194" height="100" rx="14" fill="#161B22" stroke="#30363D" filter="url(#sh)"/>
+<rect x="972" y="396" width="5" height="100" fill="#5B9BE6" clip-path="url(#c9)"/>
+<text x="990" y="425" font-size="15" font-weight="650" fill="#E6EDF3">Dedup + waves</text>
+<text x="990" y="448" font-size="13" fill="#9DA7B3">One agent per point;</text>
+<text x="990" y="467" font-size="13" fill="#9DA7B3">replies stream at once,</text>
+<text x="990" y="486" font-size="13" fill="#9DA7B3">in waves</text>
+<clipPath id="c10"><rect x="972" y="512" width="194" height="100" rx="14"/></clipPath>
+<rect x="972" y="512" width="194" height="100" rx="14" fill="#161B22" stroke="#30363D" filter="url(#sh)"/>
+<rect x="972" y="512" width="5" height="100" fill="#5B9BE6" clip-path="url(#c10)"/>
+<text x="990" y="541" font-size="15" font-weight="650" fill="#E6EDF3">Budgets</text>
+<text x="990" y="564" font-size="13" fill="#9DA7B3">≤ 7 agent messages,</text>
+<text x="990" y="583" font-size="13" fill="#9DA7B3">≤ 3 hops per turn;</text>
+<text x="990" y="602" font-size="13" fill="#9DA7B3">small talk capped</text>
+<rect x="1264" y="150" width="222" height="482" rx="20" fill="#0F1B2C" stroke="#24416A"/>
+<rect x="1280" y="166" width="109" height="30" rx="15" fill="#3178C6"/>
+<text x="1334.5" y="186" font-size="14" font-weight="700" fill="#FFFFFF" text-anchor="middle">TypeScript</text>
+<text x="1280" y="230" font-size="19" font-weight="700" fill="#E6EDF3">Steering</text>
+<text x="1280" y="252" font-size="13.5" fill="#9DA7B3">Redirect a reply mid-stream</text>
+<clipPath id="c11"><rect x="1278" y="280" width="194" height="100" rx="14"/></clipPath>
+<rect x="1278" y="280" width="194" height="100" rx="14" fill="#161B22" stroke="#30363D" filter="url(#sh)"/>
+<rect x="1278" y="280" width="5" height="100" fill="#5B9BE6" clip-path="url(#c11)"/>
+<text x="1296" y="309" font-size="15" font-weight="650" fill="#E6EDF3">Regex fast path</text>
+<text x="1296" y="332" font-size="13" fill="#9DA7B3">@Name targets and a</text>
+<text x="1296" y="351" font-size="13" fill="#9DA7B3">bare “stop”, no model</text>
+<text x="1296" y="370" font-size="13" fill="#9DA7B3">call needed</text>
+<clipPath id="c12"><rect x="1278" y="396" width="194" height="100" rx="14"/></clipPath>
+<rect x="1278" y="396" width="194" height="100" rx="14" fill="#161B22" stroke="#30363D" filter="url(#sh)"/>
+<rect x="1278" y="396" width="5" height="100" fill="#5B9BE6" clip-path="url(#c12)"/>
+<text x="1296" y="425" font-size="15" font-weight="650" fill="#E6EDF3">Steer classifier</text>
+<text x="1296" y="448" font-size="13" fill="#9DA7B3">Steer or new message?</text>
+<text x="1296" y="467" font-size="13" fill="#9DA7B3">Continue or replace?</text>
+<text x="1296" y="486" font-size="13" fill="#9DA7B3">One-off or standing?</text>
+<clipPath id="c13"><rect x="1278" y="512" width="194" height="100" rx="14"/></clipPath>
+<rect x="1278" y="512" width="194" height="100" rx="14" fill="#161B22" stroke="#30363D" filter="url(#sh)"/>
+<rect x="1278" y="512" width="5" height="100" fill="#5B9BE6" clip-path="url(#c13)"/>
+<text x="1296" y="541" font-size="15" font-weight="650" fill="#E6EDF3">Abort + restart</text>
+<text x="1296" y="564" font-size="13" fill="#9DA7B3">Segment aborted; steer is</text>
+<text x="1296" y="583" font-size="13" fill="#9DA7B3">the final user turn;</text>
+<text x="1296" y="602" font-size="13" fill="#9DA7B3">same bubble continues</text>
+<rect x="1570" y="150" width="222" height="482" rx="20" fill="#161B22" stroke="#30363D"/>
+<rect x="1586" y="166" width="131" height="30" rx="15" fill="#F0F6FC"/>
+<text x="1651.5" y="186" font-size="14" font-weight="700" fill="#0D1117" text-anchor="middle">Vercel AI SDK</text>
+<text x="1586" y="230" font-size="19" font-weight="700" fill="#E6EDF3">Models</text>
+<text x="1586" y="252" font-size="13.5" fill="#9DA7B3">Swappable by env string</text>
+<clipPath id="c14"><rect x="1584" y="280" width="194" height="100" rx="14"/></clipPath>
+<rect x="1584" y="280" width="194" height="100" rx="14" fill="#161B22" stroke="#30363D" filter="url(#sh)"/>
+<rect x="1584" y="280" width="5" height="100" fill="#E6EDF3" clip-path="url(#c14)"/>
+<text x="1602" y="309" font-size="15" font-weight="650" fill="#E6EDF3">Provider registry</text>
+<text x="1602" y="332" font-size="13" fill="#9DA7B3">provider:model from env;</text>
+<text x="1602" y="351" font-size="13" fill="#9DA7B3">swap with no code change</text>
+<clipPath id="c15"><rect x="1584" y="396" width="194" height="100" rx="14"/></clipPath>
+<rect x="1584" y="396" width="194" height="100" rx="14" fill="#161B22" stroke="#30363D" filter="url(#sh)"/>
+<rect x="1584" y="396" width="5" height="100" fill="#E6EDF3" clip-path="url(#c15)"/>
+<text x="1602" y="425" font-size="15" font-weight="650" fill="#E6EDF3">OpenAI gpt-5.6-luna</text>
+<text x="1602" y="448" font-size="13" fill="#9DA7B3">Agents, bid gate and</text>
+<text x="1602" y="467" font-size="13" fill="#9DA7B3">steer classifier;</text>
+<text x="1602" y="486" font-size="13" fill="#9DA7B3">evals judged by gpt-6-sol</text>
+<clipPath id="c16"><rect x="1584" y="512" width="194" height="100" rx="14"/></clipPath>
+<rect x="1584" y="512" width="194" height="100" rx="14" fill="#161B22" stroke="#30363D" filter="url(#sh)"/>
+<rect x="1584" y="512" width="5" height="100" fill="#E6EDF3" clip-path="url(#c16)"/>
+<text x="1602" y="541" font-size="15" font-weight="650" fill="#E6EDF3">Scripted fake</text>
+<text x="1602" y="564" font-size="13" fill="#9DA7B3">The same config switch</text>
+<text x="1602" y="583" font-size="13" fill="#9DA7B3">drives every test</text>
+<rect x="40" y="724" width="1752" height="150" rx="20" fill="#0F2017" stroke="#1F5130"/>
+<rect x="56" y="740" width="261" height="30" rx="15" fill="#2EA44F"/>
+<text x="186.5" y="760" font-size="14" font-weight="700" fill="#FFFFFF" text-anchor="middle">Vitest · fast-check · Playwright</text>
+<text x="56" y="804" font-size="19" font-weight="700" fill="#E6EDF3">Tests</text>
+<text x="56" y="826" font-size="13.5" fill="#9DA7B3">Same code, scripted or real models</text>
+<clipPath id="c17"><rect x="666" y="749" width="194" height="100" rx="14"/></clipPath>
+<rect x="666" y="749" width="194" height="100" rx="14" fill="#161B22" stroke="#30363D" filter="url(#sh)"/>
+<rect x="666" y="749" width="5" height="100" fill="#3FB950" clip-path="url(#c17)"/>
+<text x="684" y="778" font-size="15" font-weight="650" fill="#E6EDF3">Unit + integration</text>
+<text x="684" y="801" font-size="13" fill="#9DA7B3">Scripted fake LLM makes</text>
+<text x="684" y="820" font-size="13" fill="#9DA7B3">races reproducible</text>
+<clipPath id="c18"><rect x="972" y="749" width="194" height="100" rx="14"/></clipPath>
+<rect x="972" y="749" width="194" height="100" rx="14" fill="#161B22" stroke="#30363D" filter="url(#sh)"/>
+<rect x="972" y="749" width="5" height="100" fill="#3FB950" clip-path="url(#c18)"/>
+<text x="990" y="778" font-size="15" font-weight="650" fill="#E6EDF3">Property tests</text>
+<text x="990" y="801" font-size="13" fill="#9DA7B3">Random interleavings of</text>
+<text x="990" y="820" font-size="13" fill="#9DA7B3">send, steer, stop, reload</text>
+<clipPath id="c19"><rect x="1278" y="749" width="194" height="100" rx="14"/></clipPath>
+<rect x="1278" y="749" width="194" height="100" rx="14" fill="#161B22" stroke="#30363D" filter="url(#sh)"/>
+<rect x="1278" y="749" width="5" height="100" fill="#3FB950" clip-path="url(#c19)"/>
+<text x="1296" y="778" font-size="15" font-weight="650" fill="#E6EDF3">E2E</text>
+<text x="1296" y="801" font-size="13" fill="#9DA7B3">Playwright drives the real</text>
+<text x="1296" y="820" font-size="13" fill="#9DA7B3">server in a browser</text>
+<clipPath id="c20"><rect x="1584" y="749" width="194" height="100" rx="14"/></clipPath>
+<rect x="1584" y="749" width="194" height="100" rx="14" fill="#161B22" stroke="#30363D" filter="url(#sh)"/>
+<rect x="1584" y="749" width="5" height="100" fill="#3FB950" clip-path="url(#c20)"/>
+<text x="1602" y="778" font-size="15" font-weight="650" fill="#E6EDF3">Real-model evals</text>
+<text x="1602" y="801" font-size="13" fill="#9DA7B3">Persona, steering, leaks,</text>
+<text x="1602" y="820" font-size="13" fill="#9DA7B3">redundancy; LLM-judged</text>
+<path d="M248 330H358" fill="none" stroke="#8B949E" stroke-width="2"  marker-end="url(#ar)"/>
+<path d="M360 446H304V562H250" fill="none" stroke="#A371F7" stroke-width="2"  marker-end="url(#arE)"/>
+<path d="M554 330H664" fill="none" stroke="#8B949E" stroke-width="2"  marker-end="url(#ar)"/>
+<path d="M666 446H556" fill="none" stroke="#A371F7" stroke-width="2"  marker-end="url(#arE)"/>
+<path d="M860 562H916V330H970" fill="none" stroke="#8B949E" stroke-width="2"  marker-end="url(#ar)"/>
+<path d="M1278 460H1222V330H1168" fill="none" stroke="#8B949E" stroke-width="2"  marker-end="url(#ar)"/>
+<path d="M1472 446H1582" fill="none" stroke="#8B949E" stroke-width="2"  marker-end="url(#ar)"/>
+<path d="M542 150V122H1460V148" fill="none" stroke="#8B949E" stroke-width="2"  marker-end="url(#ar)"/>
+<path d="M1071 632V660H1650V634" fill="none" stroke="#8B949E" stroke-width="2"  marker-end="url(#ar)"/>
+<path d="M1750 632V692H765V634" fill="none" stroke="#A371F7" stroke-width="2"  marker-end="url(#arE)"/>
+<rect x="253" y="311" width="102" height="38" rx="8" fill="#0D1117" stroke="#3D444D" stroke-width="1.25"/>
+<text x="304" y="327.5" font-size="11.5" font-weight="650" fill="#E6EDF3" text-anchor="middle">POST /messages</text>
+<text x="304" y="342" font-size="11.5" fill="#9DA7B3" text-anchor="middle">and /stop</text>
+<rect x="276" y="485" width="56" height="38" rx="8" fill="#0D1117" stroke="#A371F7" stroke-width="1.25"/>
+<text x="304" y="501.5" font-size="11.5" font-weight="650" fill="#E6EDF3" text-anchor="middle">SSE</text>
+<text x="304" y="516" font-size="11.5" fill="#9DA7B3" text-anchor="middle">id: seq</text>
+<rect x="565.5" y="311" width="89" height="38" rx="8" fill="#0D1117" stroke="#3D444D" stroke-width="1.25"/>
+<text x="610" y="327.5" font-size="11.5" font-weight="650" fill="#E6EDF3" text-anchor="middle">append</text>
+<text x="610" y="342" font-size="11.5" fill="#9DA7B3" text-anchor="middle">user_message</text>
+<rect x="565.5" y="427" width="89" height="38" rx="8" fill="#0D1117" stroke="#A371F7" stroke-width="1.25"/>
+<text x="610" y="443.5" font-size="11.5" font-weight="650" fill="#E6EDF3" text-anchor="middle">replay, then</text>
+<text x="610" y="458" font-size="11.5" fill="#9DA7B3" text-anchor="middle">live events</text>
+<rect x="871.5" y="431" width="89" height="38" rx="8" fill="#0D1117" stroke="#3D444D" stroke-width="1.25"/>
+<text x="916" y="447.5" font-size="11.5" font-weight="650" fill="#E6EDF3" text-anchor="middle">history +</text>
+<text x="916" y="462" font-size="11.5" fill="#9DA7B3" text-anchor="middle">instructions</text>
+<rect x="1174" y="405" width="96" height="38" rx="8" fill="#0D1117" stroke="#3D444D" stroke-width="1.25"/>
+<text x="1222" y="421.5" font-size="11.5" font-weight="650" fill="#E6EDF3" text-anchor="middle">new message</text>
+<text x="1222" y="436" font-size="11.5" fill="#9DA7B3" text-anchor="middle">starts a turn</text>
+<rect x="1491.5" y="434" width="73" height="24" rx="8" fill="#0D1117" stroke="#3D444D" stroke-width="1.25"/>
+<text x="1528" y="450.5" font-size="12.5" font-weight="650" fill="#E6EDF3" text-anchor="middle">classify</text>
+<rect x="816" y="110" width="370" height="24" rx="8" fill="#0D1117" stroke="#3D444D" stroke-width="1.25"/>
+<text x="1001" y="126.5" font-size="12.5" font-weight="650" fill="#E6EDF3" text-anchor="middle">every message goes to steering after it is appended</text>
+<rect x="1241" y="648" width="239" height="24" rx="8" fill="#0D1117" stroke="#3D444D" stroke-width="1.25"/>
+<text x="1360.5" y="664.5" font-size="12.5" font-weight="650" fill="#E6EDF3" text-anchor="middle">bids · agent streams (abortable)</text>
+<rect x="814.5" y="680" width="287" height="24" rx="8" fill="#0D1117" stroke="#A371F7" stroke-width="1.25"/>
+<text x="958" y="696.5" font-size="12.5" font-weight="650" fill="#E6EDF3" text-anchor="middle">token deltas appended in ~75 ms batches</text>
+<circle cx="54" cy="280" r="12" fill="#F0F6FC" stroke="#0D1117" stroke-width="2"/>
+<text x="54" y="285" font-size="13.5" font-weight="750" fill="#0D1117" text-anchor="middle">1</text>
+<circle cx="666" cy="280" r="12" fill="#F0F6FC" stroke="#0D1117" stroke-width="2"/>
+<text x="666" y="285" font-size="13.5" font-weight="750" fill="#0D1117" text-anchor="middle">2</text>
+<circle cx="972" cy="280" r="12" fill="#F0F6FC" stroke="#0D1117" stroke-width="2"/>
+<text x="972" y="285" font-size="13.5" font-weight="750" fill="#0D1117" text-anchor="middle">3</text>
+<circle cx="1278" cy="396" r="12" fill="#F0F6FC" stroke="#0D1117" stroke-width="2"/>
+<text x="1278" y="401" font-size="13.5" font-weight="750" fill="#0D1117" text-anchor="middle">3</text>
+<circle cx="1584" cy="280" r="12" fill="#F0F6FC" stroke="#0D1117" stroke-width="2"/>
+<text x="1584" y="285" font-size="13.5" font-weight="750" fill="#0D1117" text-anchor="middle">4</text>
+<circle cx="360" cy="396" r="12" fill="#F0F6FC" stroke="#0D1117" stroke-width="2"/>
+<text x="360" y="401" font-size="13.5" font-weight="750" fill="#0D1117" text-anchor="middle">5</text>
+<path d="M40 906H76" stroke="#8B949E" stroke-width="2" marker-end="url(#ar)"/>
+<text x="90" y="911" font-size="13.5" fill="#9DA7B3">Command or model call</text>
+<path d="M262 906H298" stroke="#A371F7" stroke-width="2" marker-end="url(#arE)"/>
+<text x="312" y="911" font-size="13.5" fill="#9DA7B3">Events, in seq order</text>
+<circle cx="474" cy="906" r="10" fill="#F0F6FC"/><text x="474" y="910.5" font-size="12" font-weight="750" fill="#0D1117" text-anchor="middle">1</text>
+<text x="492" y="911" font-size="13.5" fill="#9DA7B3">Order of one message’s round trip</text>
+</svg>
