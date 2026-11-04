@@ -26,6 +26,16 @@ describe('parseTargets', () => {
     ['Theo, stop now!', ['theo'], false, true],
     ['stop being so negative', [], false, false],
     ['enough about churn, talk hiring', [], false, false],
+    ['Theo.js is nice', [], false, false],
+    ['Maya.ai', [], false, false],
+    ['Priya.io? stop', [], false, false],
+    ['Theo?', ['theo'], false, false],
+    ['Maya.', ['maya'], false, false],
+    ['Theo... stop', ['theo'], false, true],
+    ['Maya?! hold on', ['maya'], false, true],
+    ['Theo.\tShorter', ['theo'], false, false],
+    ['many thanks', [], false, false],
+    ['the plan is fine', [], false, false],
   ])('%s', (text, targets, broadcast, stop) => {
     expect(parseTargets(text)).toEqual({ targets, broadcast, stop });
   });

@@ -22,7 +22,7 @@ const BROADCAST_LEAD = new RegExp(`^(?:${BROADCAST_SRC})(?![\\w'])`, 'i');
 // goes through the classifier.
 const STOP_RE = /^(stop|wait|hold on|enough|shh|quiet)(\s+(please|everyone|all|now))?\W*$/i;
 // Ordinary words that sit within edit distance 1 of a name.
-const NOT_NAMES = new Set(['many', 'then', 'they', 'them', 'thee', 'mayo', 'the', 'prima', 'mays', 'thea', 'mama']);
+const NOT_NAMES = new Set(['then', 'they', 'them', 'thee', 'mayo', 'prima', 'mays', 'thea', 'mama']);
 
 /** Optimal string alignment distance (insert/delete/substitute/adjacent swap). */
 function osa(a: string, b: string): number {
@@ -50,9 +50,13 @@ function matchName(token: string): TargetAgentId | undefined {
   return IDS.find((id) => id.length >= 4 && osa(t, id) <= 1);
 }
 
-/** Leading name (exact or fuzzy) followed by , : ! whitespace or end. Not an apostrophe. */
+/**
+ * Leading name (exact or fuzzy) followed by , : ! whitespace or end, or by . or ?
+ * that themselves end the word ("Maya. Shorter", "Theo?" but not "Theo.js").
+ * Not an apostrophe.
+ */
 function leadingName(s: string): { id: TargetAgentId; rest: string } | undefined {
-  const m = /^([A-Za-z]+)(?=[,:!.?\s]|$)/.exec(s);
+  const m = /^([A-Za-z]+)(?=[,:!\s]|[.?]+(?:[\s,:!]|$)|$)/.exec(s);
   if (!m) return undefined;
   const id = matchName(m[1]!);
   return id ? { id, rest: s.slice(m[0].length) } : undefined;
