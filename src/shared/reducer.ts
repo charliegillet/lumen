@@ -6,6 +6,8 @@ export interface MessageView {
   text: string;
   status: 'streaming' | 'done' | 'stopped';
   startSeq: number;
+  /** Display position: startSeq, or the seq of the latest segment that moved it (a user steer). */
+  anchorSeq: number;
   segment: number;
   completedAt: number | null;
   hop: number;
@@ -14,7 +16,7 @@ export interface MessageView {
 }
 export interface ConversationView {
   lastSeq: number;
-  messages: MessageView[]; // ordered by startSeq
+  messages: MessageView[]; // ordered by anchorSeq
   instructions: { id: string; scope: AgentId | 'all'; text: string }[];
 }
 
@@ -42,6 +44,18 @@ function updateMessage(
   return next;
 }
 
+/** Updates a message and moves it to the end: it now sits below everything already shown. */
+function moveToEnd(
+  view: ConversationView,
+  id: string,
+  f: (m: MessageView) => MessageView,
+): MessageView[] | null {
+  const i = view.messages.findIndex((m) => m.id === id);
+  if (i < 0) return null;
+  const m = f(view.messages[i] as MessageView);
+  return [...view.messages.slice(0, i), ...view.messages.slice(i + 1), m];
+}
+
 export function applyEvent(view: ConversationView, e: ConvEvent): ConversationView {
   if (e.seq <= view.lastSeq) return view;
   if (e.seq > view.lastSeq + 1) throw new GapError(view.lastSeq + 1, e.seq);
@@ -61,6 +75,7 @@ export function applyEvent(view: ConversationView, e: ConvEvent): ConversationVi
             text: e.text,
             status: 'done',
             startSeq: e.seq,
+            anchorSeq: e.seq,
             segment: 0,
             completedAt: e.at,
             hop: 0,
@@ -79,6 +94,7 @@ export function applyEvent(view: ConversationView, e: ConvEvent): ConversationVi
             text: '',
             status: 'streaming',
             startSeq: e.seq,
+            anchorSeq: e.seq,
             segment: 0,
             completedAt: null,
             hop: e.hop,
@@ -92,13 +108,15 @@ export function applyEvent(view: ConversationView, e: ConvEvent): ConversationVi
         ),
       );
     case 'message_segment_started':
+      // A segment is the newest event, so moving to the end keeps anchorSeq order.
       return withMessages(
-        updateMessage(view, e.messageId, (m) => ({
+        (e.moved ? moveToEnd : updateMessage)(view, e.messageId, (m) => ({
           ...m,
           text: m.text.slice(0, e.truncateTo),
           segment: e.segment,
           status: 'streaming',
           completedAt: null,
+          anchorSeq: e.moved ? e.seq : m.anchorSeq,
         })),
       );
     case 'message_completed':

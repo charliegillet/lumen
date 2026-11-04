@@ -264,6 +264,7 @@ export function shownMessages(s: ClientState): ShownMessage[] {
       text: p.text,
       status: 'done',
       startSeq: Number.POSITIVE_INFINITY,
+      anchorSeq: Number.POSITIVE_INFINITY,
       segment: 0,
       completedAt: null,
       hop: 0,

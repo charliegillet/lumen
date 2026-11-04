@@ -34,6 +34,7 @@ const segment = (
   seg: number,
   truncateTo: number,
   mode: 'continue' | 'replace',
+  moved?: boolean,
 ): ConvEvent =>
   ev(seq, {
     type: 'message_segment_started',
@@ -42,6 +43,7 @@ const segment = (
     contextCutoffSeq: seq - 1,
     truncateTo,
     mode,
+    ...(moved === undefined ? {} : { moved }),
   });
 const msg = (v: ConversationView, id: string) => v.messages.find((m) => m.id === id)!;
 
@@ -133,6 +135,87 @@ describe('reducer', () => {
       ev(4, { type: 'message_aborted', messageId: 'A', reason: 'user_stop', truncateTo: 0 }),
     ]);
     expect(visibleMessages(v).map((m) => m.id)).toEqual(['u1', 'B']);
+  });
+
+  it('a moved segment puts the message after everything before it', () => {
+    const log = [
+      user(1, 'u1'),
+      started(2, 'A'),
+      started(3, 'B', 'theo'),
+      started(4, 'C', 'priya'),
+      delta(5, 'B', 'Hello wor'),
+      user(6, 'u6'),
+      segment(7, 'B', 1, 5, 'continue', true),
+      delta(8, 'B', ' there', 1, 5),
+    ];
+    const v = fold(log);
+    expect(v.messages.map((m) => m.id)).toEqual(['u1', 'A', 'C', 'u6', 'B']);
+    expect(msg(v, 'B')).toMatchObject({ text: 'Hello there', startSeq: 3, anchorSeq: 7, segment: 1 });
+    expect(msg(v, 'A')).toMatchObject({ startSeq: 2, anchorSeq: 2 });
+    expect(msg(v, 'u6')).toMatchObject({ startSeq: 6, anchorSeq: 6 });
+    // Messages started after the move still land below it.
+    const later = applyEvent(v, started(9, 'D', 'maya'));
+    expect(later.messages.map((m) => m.id)).toEqual(['u1', 'A', 'C', 'u6', 'B', 'D']);
+  });
+
+  it('a segment that is not moved keeps the message in place', () => {
+    for (const moved of [false, undefined]) {
+      const v = fold([
+        user(1, 'u1'),
+        started(2, 'A'),
+        started(3, 'B', 'theo'),
+        delta(4, 'A', 'abc'),
+        user(5, 'u5'),
+        segment(6, 'A', 1, 3, 'continue', moved),
+      ]);
+      expect(v.messages.map((m) => m.id)).toEqual(['u1', 'A', 'B', 'u5']);
+      expect(msg(v, 'A')).toMatchObject({ startSeq: 2, anchorSeq: 2, segment: 1 });
+    }
+  });
+
+  it('a moved reopen of a finished message moves it too', () => {
+    const v = fold([
+      user(1, 'u1'),
+      started(2, 'A'),
+      delta(3, 'A', 'abc'),
+      ev(4, { type: 'message_completed', messageId: 'A' }),
+      started(5, 'B', 'theo'),
+      user(6, 'u6'),
+      segment(7, 'A', 1, 0, 'replace', true),
+    ]);
+    expect(v.messages.map((m) => m.id)).toEqual(['u1', 'B', 'u6', 'A']);
+    expect(msg(v, 'A')).toMatchObject({ status: 'streaming', anchorSeq: 7, startSeq: 2 });
+  });
+
+  it('display order is anchorSeq order, and refolding any prefix agrees', () => {
+    const log = [
+      user(1, 'u1'),
+      started(2, 'A'),
+      started(3, 'B', 'theo'),
+      user(4, 'u4'),
+      segment(5, 'A', 1, 0, 'replace', true),
+      user(6, 'u6'),
+      segment(7, 'B', 1, 0, 'replace', true),
+      segment(8, 'A', 2, 0, 'replace', false),
+      user(9, 'u9'),
+      segment(10, 'A', 3, 0, 'replace', true),
+    ];
+    const v = fold(log);
+    expect(v.messages.map((m) => m.id)).toEqual(['u1', 'u4', 'u6', 'B', 'u9', 'A']);
+    const anchors = v.messages.map((m) => m.anchorSeq);
+    expect(anchors).toEqual([...anchors].sort((a, b) => a - b));
+    for (let n = 0; n <= log.length; n++) {
+      const step = log.slice(0, n).reduce(applyEvent, emptyView);
+      expect(step).toEqual(fold(log.slice(0, n)));
+      const a = step.messages.map((m) => m.anchorSeq);
+      expect(a).toEqual([...a].sort((x, y) => x - y));
+    }
+  });
+
+  it('a moved segment for an unknown message changes nothing but lastSeq', () => {
+    const v = fold([user(1, 'u1'), started(2, 'A')]);
+    const w = applyEvent(v, segment(3, 'ghost', 1, 0, 'replace', true));
+    expect(w).toEqual({ ...v, lastSeq: 3 });
   });
 
   it('keeps the clientMsgId on user messages only', () => {

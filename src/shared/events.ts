@@ -20,6 +20,8 @@ export type EventBody =
       contextCutoffSeq: number;
       truncateTo: number;
       mode: 'continue' | 'replace';
+      /** Set when a user steer caused this segment: the message moves below that steer. */
+      moved?: boolean;
     }
   | { type: 'message_completed'; messageId: string }
   | {
