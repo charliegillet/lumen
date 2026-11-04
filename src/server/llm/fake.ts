@@ -17,7 +17,8 @@ export interface FakeRequest {
   prompt?: string;
 }
 export type FakeReply =
-  | { chunks: string[]; delayMs: number }
+  /** `hangAfterChunks`: after that many chunks the stream goes silent until aborted. */
+  | { chunks: string[]; delayMs: number; hangAfterChunks?: number }
   | { object: unknown }
   | { error: string; afterChunks?: number };
 
@@ -131,9 +132,18 @@ const fakeModel = (modelId: string): LanguageModelV4 => ({
         try {
           controller.enqueue({ type: 'stream-start', warnings: [] });
           controller.enqueue({ type: 'text-start', id: 't' });
-          for (const delta of plan) {
+          const hangAt = 'chunks' in reply ? reply.hangAfterChunks : undefined;
+          for (const [i, delta] of plan.entries()) {
+            if (i === hangAt) {
+              await abortP;
+              return controller.error(abortError());
+            }
             if (await wait(delayMs)) return controller.error(abortError());
             controller.enqueue({ type: 'text-delta', id: 't', delta });
+          }
+          if (hangAt !== undefined && hangAt >= plan.length) {
+            await abortP;
+            return controller.error(abortError());
           }
           if (await wait(0)) return controller.error(abortError());
           if ('error' in reply) return controller.error(new Error(errorMsg));

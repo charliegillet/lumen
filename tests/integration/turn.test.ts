@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { openDb, type Db } from '../../src/server/db.js';
 import { ConversationActor } from '../../src/server/actor.js';
 import { resetFake, setFakeScript, type FakeReply } from '../../src/server/llm/fake.js';
+import { setStreamTimeouts } from '../../src/server/llm/stream.js';
 import { BUDGET, GATE_TIMEOUT_MS, SMALL_TALK_CAPS, runTurn } from '../../src/server/orchestrator/turn.js';
 import type { AgentId, ConvEvent } from '../../src/shared/events.js';
 
@@ -39,7 +40,7 @@ const QUIET: GateAns = { should_respond: false, novelty: 0, gist: '' };
  */
 function script(o: {
   gate: (agentId: AgentId, n: number) => GateAns;
-  reply: (agentId: AgentId, n: number) => { chunks: string[]; delayMs: number };
+  reply: (agentId: AgentId, n: number) => { chunks: string[]; delayMs: number; hangAfterChunks?: number };
   clusters?: AgentId[][];
 }): void {
   const counts = new Map<string, number>();
@@ -97,6 +98,28 @@ const started = (): Started[] => events().filter((e): e is Started => e.type ===
 const startedBy = (id: AgentId) => started().filter((e) => e.agentId === id);
 
 describe('runTurn', () => {
+  it('a hung stream ends its turn and the agent speaks in the next one', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    setStreamTimeouts({ idleMs: 150 });
+    try {
+      script({
+        gate: (id, n) => (id === 'maya' && n <= 1 ? { should_respond: true, novelty: 2, gist: 'a point' } : QUIET),
+        reply: (_id, n) =>
+          n === 0 ? { chunks: ['Half an ', 'answer'], delayMs: 1, hangAfterChunks: 1 } : { chunks: ['Fine.'], delayMs: 1 },
+      });
+      await runTurn(actor, { triggerMessageId: 'u1', forced: [] });
+      expect(actor.generations.size).toBe(0);
+      expect(actor.view.messages.at(-1)).toMatchObject({ status: 'stopped', text: 'Half an ' });
+
+      actor.append({ type: 'user_message', messageId: 'u2', clientMsgId: 'cm2', text: 'And then?' });
+      await runTurn(actor, { triggerMessageId: 'u2', forced: [] });
+      expect(startedBy('maya')).toHaveLength(2);
+      expect(actor.view.messages.at(-1)).toMatchObject({ status: 'done', text: 'Fine.' });
+    } finally {
+      setStreamTimeouts();
+    }
+  });
+
   it('concurrent wave: both start before either completes and deltas interleave', async () => {
     script({
       gate: (id, n) =>

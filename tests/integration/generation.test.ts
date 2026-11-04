@@ -11,6 +11,7 @@ import {
   type Generation,
 } from '../../src/server/orchestrator/generation.js';
 import { visibleMessages } from '../../src/shared/reducer.js';
+import { setStreamTimeouts, STREAM_IDLE_MS, STREAM_TOTAL_MS } from '../../src/server/llm/stream.js';
 import type { AgentId, ConvEvent, EventBody } from '../../src/shared/events.js';
 
 // Lets one test replace streamChat with a stream that ignores abort and keeps
@@ -433,6 +434,54 @@ describe('Generation', () => {
       await sleep(150);
       expect(uncaught).toEqual([]);
     });
+  });
+});
+
+describe('hung streams', () => {
+  afterEach(() => setStreamTimeouts());
+
+  it('defaults to a 25 s idle and 120 s total cap', () => {
+    expect(STREAM_IDLE_MS).toBe(25_000);
+    expect(STREAM_TOTAL_MS).toBe(120_000);
+  });
+
+  it('a stream that goes silent fails the message, keeping its text, and frees the agent', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    setStreamTimeouts({ idleMs: 150 });
+    setFakeScript(() => ({ chunks: ['Hello ', 'there'], delayMs: 1, hangAfterChunks: 1 }));
+    const g = start();
+    expect(await g.done).toBe('error');
+    expect(actor.generations.has(g.messageId)).toBe(false);
+    expect(msg(g)).toMatchObject({ status: 'stopped', text: 'Hello ' });
+    expect(eventsFor(g).at(-1)).toMatchObject({ type: 'message_aborted', reason: 'error', truncateTo: 6 });
+    const warned = (console.warn as unknown as { mock: { calls: unknown[][] } }).mock.calls.flat();
+    expect(warned.some((x) => x instanceof Error && x.name === 'StreamTimeoutError')).toBe(true);
+
+    setFakeScript(() => ({ chunks: ['Back.'], delayMs: 1 }));
+    const next = start();
+    expect(await next.done).toBe('completed');
+    expect(msg(next)?.text).toBe('Back.');
+  });
+
+  it('a stream that keeps trickling past the total cap fails too', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    setStreamTimeouts({ idleMs: 1000, totalMs: 200 });
+    setFakeScript(() => ({ chunks: Array.from({ length: 100 }, (_, i) => `w${i} `), delayMs: 20 }));
+    const g = start();
+    expect(await g.done).toBe('error');
+    expect(msg(g)?.status).toBe('stopped');
+    expect(msg(g)?.text.length).toBeGreaterThan(0);
+    expect(msg(g)?.text).not.toContain('w99');
+  });
+
+  it('a stream that never sends anything fails cleanly', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    setStreamTimeouts({ idleMs: 100 });
+    setFakeScript(() => ({ chunks: [], delayMs: 0, hangAfterChunks: 0 }));
+    const g = start();
+    expect(await g.done).toBe('error');
+    expect(actor.generations.size).toBe(0);
+    expect(visibleMessages(actor.view).some((m) => m.id === g.messageId)).toBe(false);
   });
 });
 
