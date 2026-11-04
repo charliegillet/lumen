@@ -264,6 +264,13 @@ function without<V>(map: Map<string, V>, id: string): Map<string, V> {
   return next;
 }
 
+/** Held words stay after a message ends while its typewriter has text to show but has shown none yet. */
+function keepHeld(s: ClientState, view: ConversationView, id: string): boolean {
+  const r = s.reveal.get(id);
+  const m = view.messages.find((x) => x.id === id);
+  return r !== undefined && r.shown === 0 && m !== undefined && m.text !== '';
+}
+
 /** Applies one server event. Throws GapError when events were missed. Reads the clock for canStop. */
 export function onEvent(s: ClientState, e: ConvEvent): ClientState {
   const view = applyEvent(s.view, e);
@@ -308,6 +315,17 @@ export function onEvent(s: ClientState, e: ConvEvent): ClientState {
       const m = view.messages.find((x) => x.id === e.messageId);
       if (!before || !m || m.text === before.text) return next;
       if (s.animate && m.status === 'streaming') {
+        // Text that begins with the held words (a failed rewrite putting the
+        // answer back, or a rewrite that opens the same way) continues from
+        // them: those words are on screen already and must not be retyped.
+        const held = s.held.get(e.messageId);
+        if (held !== undefined && m.text.startsWith(held)) {
+          return {
+            ...next,
+            held: without(s.held, e.messageId),
+            reveal: new Map(s.reveal).set(e.messageId, { shown: held.length, pos: held.length }),
+          };
+        }
         // Live words: start (or keep) the typewriter from what was on screen.
         if (s.reveal.has(e.messageId)) return next;
         const from = before.text.length;
@@ -316,25 +334,23 @@ export function onEvent(s: ClientState, e: ConvEvent): ClientState {
       if (s.held.has(e.messageId) && shownLength(next, m) > 0) return { ...next, held: without(s.held, e.messageId) };
       return next;
     }
-    case 'message_completed': {
+    case 'message_completed':
       // The typewriter (if any) finishes on its own, quickly; held words stay until it shows something.
-      const r = s.reveal.get(e.messageId);
-      const m = view.messages.find((x) => x.id === e.messageId);
-      const keepHeld = r !== undefined && r.shown === 0 && m !== undefined && m.text !== '';
       return {
         ...next,
         frozen: without(s.frozen, e.messageId),
-        held: keepHeld ? s.held : without(s.held, e.messageId),
+        held: keepHeld(s, view, e.messageId) ? s.held : without(s.held, e.messageId),
         lastWorkAt: Date.now(),
       };
-    }
-    case 'message_aborted':
+    case 'message_aborted': {
+      const reveal = clampReveal(s.reveal, e.messageId, e.truncateTo);
       return {
         ...next,
         frozen: without(s.frozen, e.messageId),
-        held: without(s.held, e.messageId),
-        reveal: clampReveal(s.reveal, e.messageId, e.truncateTo),
+        held: keepHeld({ ...s, reveal }, view, e.messageId) ? s.held : without(s.held, e.messageId),
+        reveal,
       };
+    }
     case 'stop_all':
       // The aborts that follow carry the final text; hold everything until they land.
       // Sends before it are stopped too, so they no longer count as pending work.

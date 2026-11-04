@@ -217,6 +217,44 @@ describe('typewriter reveal', () => {
     }
   });
 
+  it('a failed rewrite that restores the answer keeps it on screen instead of retyping it', () => {
+    let s = frames(apply(animated(), deltaAt(4, 'B', 'Old answer here ', 0)), 30);
+    expect(shown(s, 'B')).toBe('Old answer here ');
+    s = apply(s, user(5, 'u2'), segStart(6, 'B', 1, 0, 'replace'));
+    expect(shown(s, 'B')).toBe('Old answer here '); // held
+    // The server puts the old text back in the new segment, then aborts with an error.
+    s = apply(s, deltaAt(7, 'B', 'Old answer here ', 0, 1));
+    expect(shown(s, 'B')).toBe('Old answer here ');
+    expect(s.held.has('B')).toBe(false);
+    expect(renderedCounts(s).B).toBe('Old answer here '.length); // a stop now would keep all of it
+    s = apply(s, ev(8, { type: 'message_aborted', messageId: 'B', reason: 'error', truncateTo: 16 }));
+    for (let i = 0; i < 5; i++) {
+      s = advanceReveal(s, 16);
+      expect(shown(s, 'B')).toBe('Old answer here ');
+    }
+  });
+
+  it('a restore of a partly revealed answer continues from the words that were shown', () => {
+    let s = advanceReveal(apply(animated(), deltaAt(4, 'B', 'one two three four ', 0)), 110);
+    expect(shown(s, 'B')).toBe('one two ');
+    s = apply(s, user(5, 'u2'), segStart(6, 'B', 1, 0, 'replace'), deltaAt(7, 'B', 'one two three four ', 0, 1));
+    expect(shown(s, 'B')).toBe('one two ');
+    for (let i = 0; i < 30; i++) {
+      s = advanceReveal(s, 16);
+      expect(shown(s, 'B').startsWith('one two ')).toBe(true); // never collapses back
+    }
+    expect(shown(s, 'B')).toBe('one two three four ');
+  });
+
+  it('an error before the rewrite showed anything keeps the held words until it does', () => {
+    let s = frames(apply(animated(), deltaAt(4, 'B', 'Old words ', 0)), 30);
+    s = apply(s, user(5, 'u2'), segStart(6, 'B', 1, 0, 'replace'), deltaAt(7, 'B', 'New ', 0, 1));
+    s = apply(s, ev(8, { type: 'message_aborted', messageId: 'B', reason: 'error', truncateTo: 4 }));
+    expect(shown(s, 'B')).toBe('Old words ');
+    s = frames(s, 20);
+    expect(shown(s, 'B')).toBe('New ');
+  });
+
   it('held words from before a rewrite stay until the rewrite shows its first word', () => {
     let s = apply(animated(), deltaAt(4, 'B', 'Old answer ', 0));
     s = frames(s, 20);
