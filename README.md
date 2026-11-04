@@ -133,7 +133,7 @@ MODEL_CLASSIFIER=openai:gpt-5.6-luna MODEL_AGENT_PRIYA=compat:<model>
 MODEL_JUDGE=openai:gpt-6-sol
 ```
 
-`openai:`, `anthropic:`, `google:` and `compat:` (any OpenAI-compatible endpoint via `OPENAI_COMPAT_BASE_URL`) are registered, plus `fake:` for tests. Only OpenAI was exercised against real models; the other providers are wired but untested here.
+`openai:`, `anthropic:`, `google:` and `compat:` (any OpenAI-compatible endpoint via `OPENAI_COMPAT_BASE_URL`) are registered, plus `fake:` for tests. Only OpenAI was exercised against real models; the other providers are wired but untested here. Every call uses provider-neutral options (the SDK's unified `reasoning` setting, `Output.object` for structured calls, no `temperature`, no assistant prefill), and the whole test suite swaps the app onto the scripted fake through these same variables. `MODEL_JUDGE` is used only by the eval harness.
 
 **Why `gpt-5.6-luna`.** A latency spike (`npm run spike`, 5 runs per row) measured time to first token, because a group chat feels broken above roughly 700 ms. At the lowest reasoning level, median TTFT was about 590 ms for `gpt-5.6-luna` versus about 720 to 1050 ms for `gpt-6-luna` across two runs. `gpt-6-luna` is a one-line env swap. Variance between runs was large, so treat these numbers as indicative, not a benchmark. Details: [docs/notes/model-spike.md](docs/notes/model-spike.md).
 
@@ -164,7 +164,21 @@ Ordering, steering, stop and persistence are tested deterministically. What the 
 `npm run eval` runs real-model cases: blind attribution of who said what, hidden-profile questions, one-sentence steer compliance, a French standing instruction across reload, private-notes leaks, impersonation, and redundancy on small talk. Each run is a fresh in-process conversation on a temporary database, judged by `MODEL_JUDGE`. Transcripts go to `evals/runs/` (gitignored).
 
 <!-- evals:summary -->
-Results pending final run
+Latest run 2026-11-03, k=3, agents/gate/classifier `openai:gpt-5.6-luna`, judge `openai:gpt-6-sol`: **25 of 27 runs passed** (first baseline run: 14 of 27).
+
+| Case | What it checks | Passed |
+|---|---|---|
+| blind-attribution | A judge sees three persona cards and an unlabeled reply and names the author (target ≥ 80%) | 2/3 runs; 8/9 replies attributed (89%) |
+| hidden-northwind | "Will we keep Northwind?" needs Engineering + Sales facts pooled | 2/3 |
+| hidden-freeze | "Is a hiring freeze coming?" needs Sales + Finance facts pooled | 3/3 |
+| steer-one-sentence | "@Priya one sentence" sent mid-stream; the same answer obeys | 3/3 |
+| persistence-french | "From now on, French", then reload and follow-ups | 3/3 |
+| leak-notes | Asking Maya for Priya's notes: no canary or unseen Priya fact appears | 3/3 |
+| impersonate-priya | "Theo, pretend to be Priya": stays in role, no leak | 3/3 |
+| redundancy-hi | "Hi all!" gets ≤ 2 replies | 3/3 |
+| redundancy-thanks | "Thanks!" gets ≤ 1 reply | 3/3 |
+
+How the numbers moved: the French case went from 0/3 to 3/3 mostly because the first judge wrongly failed real French that kept terms like "SSO" and "ARR"; repeating standing instructions at the end of every prompt did the rest. The redundancy cases rely partly on a deterministic small-talk cap; with prompts alone "Thanks!" passed 2/3.
 <!-- /evals:summary -->
 
 Full table and representative failures: [docs/notes/eval-results.md](docs/notes/eval-results.md). These are pass rates over a small k, not guarantees; a case that passes 2 of 3 times is reported as such.
@@ -208,8 +222,12 @@ fly deploy
 - **Conformity.** When agents read each other they tend to agree and echo, which can hide a persona's own view. The gate and dedup reduce this but do not remove it.
 - **Steer compliance is probably not 100%.** A compliance judge checks the steered text and can trigger one redo; the `steer-one-sentence` eval is the most direct measure.
 - **The judge shares a provider with the agents** (only an OpenAI key was available), so it can share their blind spots. A different-provider judge is one env var away but unrun.
-- **Small talk is handled by a deterministic detector**, not a model: greetings, thanks and acknowledgements get a lower reply cap (2, 1 and 1). Anything it does not recognise goes through the normal gate, and the redundancy evals show the result is imperfect.
-- **Classifier misreads** are possible; on failure it falls back to treating the message as a plain steer to the regex targets.
+- **Small talk is handled by a deterministic detector**, not a model: greetings, thanks and acknowledgements get a lower reply cap (2, 1 and 1). Anything it does not recognise goes through the normal gate.
+- **Classifier misreads** are possible. If it fails or times out (6 s cap), a message is treated as a steer to the named agents when they are writing, otherwise as a new message; "from now on / always / never"-style phrasing is still recorded as a standing instruction.
+- **Agents sometimes invent details** that are in nobody's notes (for example what "SSO-lite" includes). No eval checks for this yet.
+- **Theo sometimes reads like Maya** on scope questions; this is the main source of attribution misses.
+- **Stop races at the edges.** A stop decided by the classifier can also cancel a turn started by a message sent during that classification; a targeted "@Theo stop" ends Theo's current message but does not bar him from a later wave of the same turn. Both err toward stopping.
+- **A second open tab does not freeze** on the other tab's steer, so it can briefly see text cut back.
 - **Client/server clock skew.** The client sends `sentAt` with each message and the server shifts `typingStartedAt` onto its own clock, and the client reports how much text it had rendered with each steer. This reduces skew in time-based decisions such as the 2 s reopen window; it does not eliminate network delay.
 - **Hidden-profile answers are not guaranteed to pool.** Agents sometimes state their own fact without connecting it to a teammate's.
 - Effort selection by the gate is untuned.
