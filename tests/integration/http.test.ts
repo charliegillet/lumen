@@ -196,14 +196,41 @@ describe('commands', () => {
       { rendered: { a: 1.5 } },
       { rendered: 'x' },
       { typingStartedAt: 'now' },
+      { sentAt: 'now' },
+      { sentAt: {} },
     ];
     for (const o of bads) expect((await post('/api/conv/c1/messages', msgBody(o))).status).toBe(400);
+    // JSON cannot spell Infinity, but 1e999 parses to it.
+    const inf = await app.request('/api/conv/c1/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{"clientMsgId":"inf","text":"hi","typingStartedAt":1,"sentAt":1e999}',
+    });
+    expect(inf.status).toBe(400);
     const res = await app.request('/api/conv/c1/messages', { method: 'POST', body: 'not json' });
     expect(res.status).toBe(400);
     // rendered optional, defaults to {}
     const ok = await post('/api/conv/c1/messages', { clientMsgId: 'ok', text: 'hi', typingStartedAt: 123 });
     expect(ok.status).toBe(200);
     expect(handle.lastInput).toMatchObject({ rendered: {}, typingStartedAt: 123 });
+  });
+
+  it('shifts typingStartedAt by the client clock offset from sentAt', async () => {
+    const serverNow = 1_000_000;
+    vi.spyOn(Date, 'now').mockReturnValue(serverNow);
+    try {
+      // Client clock runs 5s behind the server.
+      await post('/api/conv/c1/messages', msgBody({ clientMsgId: 's1', typingStartedAt: 990_000, sentAt: 995_000 }));
+      expect(handle.lastInput).toMatchObject({ typingStartedAt: 995_000 });
+      // No sentAt: passed through unchanged.
+      await post('/api/conv/c1/messages', msgBody({ clientMsgId: 's2', typingStartedAt: 990_000 }));
+      expect(handle.lastInput).toMatchObject({ typingStartedAt: 990_000 });
+      // sentAt without typingStartedAt: stays null.
+      await post('/api/conv/c1/messages', msgBody({ clientMsgId: 's3', typingStartedAt: null, sentAt: 995_000 }));
+      expect(handle.lastInput).toMatchObject({ typingStartedAt: null });
+    } finally {
+      vi.restoreAllMocks();
+    }
   });
 
   it('stop validates and is idempotent', async () => {

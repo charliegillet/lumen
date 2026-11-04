@@ -383,7 +383,8 @@ export function useConversation(id: string): Conversation {
     (clientMsgId: string) => {
       const info = sendInfo.current.get(clientMsgId);
       if (!info) return;
-      postJson(`${base}/messages`, { clientMsgId, ...info })
+      // sentAt lets the server map typingStartedAt onto its own clock.
+      postJson(`${base}/messages`, { clientMsgId, ...info, sentAt: Date.now() })
         .then((r) => {
           const seq = (r as { seq?: unknown }).seq;
           if (typeof seq === 'number') update((s) => ackPending(s, clientMsgId, seq));

@@ -147,11 +147,17 @@ export function createApp(db: Db): Hono {
     if (t !== null && (typeof t !== 'number' || !Number.isFinite(t))) {
       return bad(c, 'typingStartedAt must be a number or null');
     }
+    const sentAt = body.sentAt ?? null;
+    if (sentAt !== null && (typeof sentAt !== 'number' || !Number.isFinite(sentAt))) {
+      return bad(c, 'sentAt must be a finite number');
+    }
+    // typingStartedAt is a client timestamp: move it onto the server clock.
+    const typingStartedAt = t !== null && sentAt !== null ? t + (Date.now() - sentAt) : t;
     const actor = getActor(db, c.req.param('id'));
     const { seq } = await handleUserMessage(actor, {
       clientMsgId: id.value,
       text,
-      typingStartedAt: t,
+      typingStartedAt,
       rendered: r.value,
     });
     return c.json({ seq });
