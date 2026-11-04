@@ -253,6 +253,25 @@ describe('buildPrompt', () => {
     }
   });
 
+  it('repeats active standing instructions at the end of the final turn, before the identity reminder', () => {
+    const log = fixture();
+    log.instruct('i1', 'all', 'INSTR-ALL');
+    log.instruct('i2', 'theo', 'INSTR-THEO');
+    log.instruct('i3', 'all', 'INSTR-GONE');
+    log.revoke('i3');
+    for (const mode of MODES) {
+      const t = textOf(last(buildPrompt('maya', log.events, log.seq, mode).messages));
+      const at = t.indexOf('Standing instructions you must follow in this reply:');
+      expect(at, mode.kind).toBeGreaterThan(-1);
+      expect(t.indexOf('INSTR-ALL')).toBeGreaterThan(at);
+      expect(t.indexOf('INSTR-ALL')).toBeLessThan(t.indexOf('You are Maya. Stay in your voice.'));
+      expect(t).not.toContain('INSTR-THEO');
+      expect(t).not.toContain('INSTR-GONE');
+    }
+    const none = textOf(last(buildPrompt('maya', fixture().events, fixture().seq, MODES[1]!).messages));
+    expect(none).not.toContain('Standing instructions you must follow');
+  });
+
   it('a re-set instruction moves to the end (latest wins)', () => {
     const log = new Log();
     log.user('hi');

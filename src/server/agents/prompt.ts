@@ -81,20 +81,21 @@ function renderSystem(p: Persona, view: ConversationView, mode: PromptMode): str
     section('Handling pressure', bullets(p.playbook)),
   ];
 
-  const standing = view.instructions.filter((i) => i.scope === 'all' || i.scope === p.id);
-  if (standing.length > 0) {
-    sections.push(
-      section(
-        'Standing instructions from the person (latest wins on conflict)',
-        standing
-          .map((i) => `- ${i.scope === 'all' ? '[to everyone]' : `[to you, ${p.name}]`} ${i.text}`)
-          .join('\n'),
-      ),
-    );
+  const standing = standingLines(p, view);
+  if (standing) {
+    sections.push(section('Standing instructions from the person (latest wins on conflict)', standing));
   }
 
   if (mode.kind !== 'gate') sections.push(section('Length', EFFORT[mode.effort].lengthHint));
   return sections.join('\n\n');
+}
+
+/** The person's active standing instructions for this persona, one per line, or '' when none. */
+function standingLines(p: Persona, view: ConversationView): string {
+  return view.instructions
+    .filter((i) => i.scope === 'all' || i.scope === p.id)
+    .map((i) => `- ${i.scope === 'all' ? '[to everyone]' : `[to you, ${p.name}]`} ${i.text}`)
+    .join('\n');
 }
 
 const section = (title: string, body: string) => `## ${title}\n${body}`;
@@ -119,7 +120,10 @@ function renderMessages(p: Persona, view: ConversationView, mode: PromptMode): M
     append(turns, own ? { role: 'assistant', content: m.text } : { role: 'user', content: wrap(m) });
   }
 
-  const tail = `${finalBlock(p, mode)}\n\n${identityReminder(p)}`;
+  // Standing instructions are repeated here, where steers sit, so they stay salient.
+  const standing = standingLines(p, view);
+  const reminder = standing ? `Standing instructions you must follow in this reply:\n${standing}\n\n` : '';
+  const tail = `${finalBlock(p, mode)}\n\n${reminder}${identityReminder(p)}`;
   append(turns, { role: 'user', content: tail });
   return turns;
 }
