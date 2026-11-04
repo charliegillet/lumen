@@ -52,6 +52,7 @@ Key properties:
 - **Display order is a fold too.** Messages show in `anchorSeq` order: the seq of their start event, or of the latest `message_segment_started` with `moved: true`. Only a user steer sets `moved` (a mid-stream restart, a debounced re-restart, or the reopen of a just-finished message), so a steered answer moves to sit after the steer that redirected it, keeping its id, its bubble and, in continue mode, the text already shown. The reducer moves the message to the end of the array, which is the same thing because a segment event is always the newest. The compliance redo, stops and unsteered agents never move anything; logs written before the field existed fold exactly as before.
 - **Crash recovery.** On actor construction any message still `streaming` gets `message_aborted(server_restart)`.
 - **Steering never waits on the model to be responsive.** The client freezes the visible text of a targeted agent locally (regex target parse) before the POST returns; the server's classifier decides what actually happens, then a `steer_resolved` event releases the freeze. The freeze also times out after 7 s (above the server's 6 s classifier cap).
+- **Typing dots and typewriter (client only).** A message gets a bubble with typing dots from its `message_started` until it shows words; agents still gating have no message and so never show dots, and a message that ends empty loses its bubble. Live `token_delta` text is revealed per animation frame at about 75 chars/s, rising with the backlog so the display stays within ~300 ms of what arrived, at word boundaries; an ended message drains in ~150 ms. Snapshots, reloads and reduced motion show text at once. A freeze stops the reveal where it is, truncations clamp it, and `rendered` counts sent with a steer or stop are the revealed lengths, so the server cuts at what the person actually saw. The reveal is pure state (`advanceReveal` in `useConversation.ts`); the server is unchanged (75 ms flush).
 - **Fail-soft model calls.** Gate, dedup, classifier and judge calls are structured calls with timeouts; each falls back (e.g. classifier failure treated as a plain steer to the regex targets) rather than blocking the chat.
 
 ## Mid-stream steer
@@ -146,7 +147,7 @@ Checked by `tests/property/invariants.test.ts` (fast-check, random interleavings
 | `src/server/steering/handle.ts`, `classify.ts` | user message and stop handling; LLM steer classifier; judge |
 | `src/server/agents/` | personas and prompt construction |
 | `src/server/llm/` | provider registry, structured and streaming helpers, fake provider and scripts |
-| `src/web/useConversation.ts` | client state: reducer, freeze, held text, pending sends, SSE and resume |
+| `src/web/useConversation.ts` | client state: reducer, freeze, held text, typewriter reveal, pending sends, SSE and resume |
 | `src/web/App.tsx`, `Bubble.tsx`, `Composer.tsx` | UI |
 | `tests/` | unit, integration, property (`invariants.test.ts`), Playwright e2e against the fake |
 | `evals/` | model-behavior evals (pass rates) |

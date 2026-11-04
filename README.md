@@ -61,7 +61,7 @@ Lumen treats the conversation as an append-only event log with a single writer. 
 | **2** | **Append.** One in-memory `ConversationActor` per conversation is the only writer. It assigns a gap-free `seq` and inserts the `user_message` row with no `await` in between, then notifies subscribers in `seq` order. | ![SQLite](https://img.shields.io/badge/-SQLite%20WAL-003B57?style=flat-square&logo=sqlite&logoColor=white) |
 | **3** | **Decide.** Steering runs first: a regex finds `@names` and bare stops; an LLM classifier decides steer or new message, continue or replace, one-off or standing. A new message starts a turn, where each agent's bid gate reads its own private notes and decides whether to speak and with what effort. Dedup keeps one agent per point. | ![TypeScript](https://img.shields.io/badge/-TypeScript-3178C6?style=flat-square&logo=typescript&logoColor=white) ![OpenAI](https://img.shields.io/badge/-gpt--5.6--luna-412991?style=flat-square&logo=openai&logoColor=white) |
 | **4** | **Stream.** Selected agents stream concurrently in waves (at most 7 agent messages and 3 agent-to-agent hops per turn; small talk is capped lower). Token deltas are appended to the log in ~75 ms batches. A steer aborts the target's current segment and restarts it in the same bubble, with the steer as the final user turn; that bubble moves to sit right after the steer, so the conversation still reads in order. | ![Vercel AI SDK](https://img.shields.io/badge/-Vercel%20AI%20SDK-000000?style=flat-square&logo=vercel&logoColor=white) |
-| **5** | **Deliver.** Server-sent events carry `id: seq`. A client that drops or reloads replays everything after its last `seq`, then continues live (20 s keep-alive ping). The browser renders a pure fold of the log with the same reducer the server uses. | ![Hono](https://img.shields.io/badge/-SSE-E36002?style=flat-square&logo=hono&logoColor=white) ![React](https://img.shields.io/badge/-reducer-61DAFB?style=flat-square&logo=react&logoColor=black) |
+| **5** | **Deliver.** Server-sent events carry `id: seq`. A client that drops or reloads replays everything after its last `seq`, then continues live (20 s keep-alive ping). The browser renders a pure fold of the log with the same reducer the server uses. An agent that has started shows typing dots until its first words, and live words are revealed at a steady pace (about 75 chars/s, faster when behind, never more than ~300 ms back); reloads show text at once. | ![Hono](https://img.shields.io/badge/-SSE-E36002?style=flat-square&logo=hono&logoColor=white) ![React](https://img.shields.io/badge/-reducer-61DAFB?style=flat-square&logo=react&logoColor=black) |
 
 Other details:
 
@@ -143,8 +143,8 @@ MODEL_JUDGE=openai:gpt-6-sol
 
 | Check | Result |
 |---|---|
-| `npm test`: unit (161), integration (151) and property (1 suite), all against a scripted fake LLM so races are reproducible | **313 passed** in 16 files, ~12 s |
-| `npm run test:e2e`: Playwright against the real built server in fake mode, Chromium (stream, steer, stop, reload mid-stream and after, standing instruction across reload, no internals in the UI) | **7 of 7 passed**, ~20 s |
+| `npm test`: unit (170), integration (151) and property (1 suite), all against a scripted fake LLM so races are reproducible | **322 passed** in 16 files, ~12 s |
+| `npm run test:e2e`: Playwright against the real built server in fake mode, Chromium (stream, typing dots, steer, stop, reload mid-stream and after, standing instruction across reload, no internals in the UI) | **8 of 8 passed**, ~20 s |
 | Property tests: fast-check over random interleavings of sends, steers, stops, reloads, token arrival and 75 ms flush timers, with fake timers | **100 runs** per `npm test`; **13,000 runs** passed with `PROPERTY_RUNS=13000` (~160 s) |
 | `npm run typecheck` (strict) | clean |
 | `npm run eval`: real models, judged by `gpt-6-sol`, reported as pass rates over k runs | see [Evals](#evals) |
@@ -193,7 +193,7 @@ Full table and representative failures: [docs/notes/eval-results.md](docs/notes/
 | ✅ **Group chat** | Three personas streaming concurrently with private notes, bid gate, dedup, waves and budgets |
 | ✅ **Steering** | `@Name` steers, stop, continue or replace, standing instructions, late-steer reopen; instant client-side freeze |
 | ✅ **Ordering and persistence** | Single-writer event log in SQLite WAL; reload and reconnect replay by `seq`; crash recovery |
-| ✅ **Tests** | 313 Vitest tests, 7 Playwright specs, property tests (13,000 runs explored), strict typecheck |
+| ✅ **Tests** | 322 Vitest tests, 8 Playwright specs, property tests (13,000 runs explored), strict typecheck |
 | ✅ **Real-model evals** | Harness and cases built and run against OpenAI; results in [docs/notes/eval-results.md](docs/notes/eval-results.md) |
 | ✅ **Deploy** | Live on Fly.io: [lumen-group-chat.fly.dev](https://lumen-group-chat.fly.dev) (one machine, SQLite on a volume, rate-limited) |
 
