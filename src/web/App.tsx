@@ -132,6 +132,7 @@ export function App({ conversationId }: { conversationId: string }) {
                 last={!next || authorKey(next) !== who}
                 failed={m.failed}
                 anchor={m.pending ? undefined : m.anchorSeq}
+                typing={m.typing}
                 onRetry={m.failed ? () => retry(m.key) : undefined}
               />
             );

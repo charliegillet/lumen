@@ -59,6 +59,8 @@ interface BubbleProps {
   last: boolean;
   failed: boolean;
   onRetry?: () => void;
+  /** Started but no words on screen yet: show typing dots instead of text. */
+  typing?: boolean;
   /** Display position (anchorSeq). When it changes after mount the bubble eases in at its new place. */
   anchor?: number;
 }
@@ -78,7 +80,7 @@ function useArrival(anchor: number | undefined) {
   return ref;
 }
 
-export const Bubble = memo(function Bubble({ agentId, text, first, last, failed, onRetry, anchor }: BubbleProps) {
+export const Bubble = memo(function Bubble({ agentId, text, first, last, failed, onRetry, anchor, typing }: BubbleProps) {
   const ref = useArrival(anchor);
   if (agentId === null) {
     return (
@@ -110,9 +112,17 @@ export const Bubble = memo(function Bubble({ agentId, text, first, last, failed,
             <span className="role">{a.role}</span>
           </div>
         )}
-        <div className="bubble bubble-agent">
-          <RichText text={text} />
-        </div>
+        {typing ? (
+          <div className="bubble bubble-agent bubble-typing" role="img" aria-label={`${a.name} is typing`}>
+            <span className="typing-dot" />
+            <span className="typing-dot" />
+            <span className="typing-dot" />
+          </div>
+        ) : (
+          <div className="bubble bubble-agent">
+            <RichText text={text} />
+          </div>
+        )}
       </div>
     </div>
   );
