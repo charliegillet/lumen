@@ -16,12 +16,12 @@ export function modelSpec(role: Role, agentId?: AgentId): string {
       return (
         (agentId ? env[`MODEL_AGENT_${agentId.toUpperCase()}`] : undefined) ??
         env.MODEL_AGENT ??
-        'openai:gpt-6-luna'
+        'openai:gpt-5.6-luna'
       );
     case 'gate':
-      return env.MODEL_GATE ?? 'openai:gpt-6-luna';
+      return env.MODEL_GATE ?? 'openai:gpt-5.6-luna';
     case 'classifier':
-      return env.MODEL_CLASSIFIER ?? 'openai:gpt-6-luna';
+      return env.MODEL_CLASSIFIER ?? 'openai:gpt-5.6-luna';
     case 'judge':
       return env.MODEL_JUDGE ?? 'openai:gpt-6-sol';
   }
@@ -35,16 +35,26 @@ function buildRegistry() {
     openai: createOpenAI(),
     anthropic: createAnthropic(),
     google: createGoogleGenerativeAI(),
-    compat: createOpenAICompatible({
-      name: 'compat',
-      baseURL: process.env.OPENAI_COMPAT_BASE_URL ?? 'http://localhost:11434/v1',
-      apiKey: process.env.OPENAI_COMPAT_API_KEY,
-    }),
     fake: fakeProvider,
   });
 }
 
 export function modelFor(role: Role, agentId?: AgentId): LanguageModel {
+  const spec = modelSpec(role, agentId);
+  if (spec.startsWith('compat:')) return compatModel(spec);
   registry ??= buildRegistry();
-  return registry.languageModel(modelSpec(role, agentId) as Parameters<ReturnType<typeof buildRegistry>['languageModel']>[0]);
+  return registry.languageModel(spec as Parameters<ReturnType<typeof buildRegistry>['languageModel']>[0]);
+}
+
+/** Built per call so the base URL is read from env at request time, never a guessed default. */
+function compatModel(spec: string): LanguageModel {
+  const baseURL = process.env.OPENAI_COMPAT_BASE_URL;
+  if (!baseURL) {
+    throw new Error(`model "${spec}" requires OPENAI_COMPAT_BASE_URL to be set`);
+  }
+  return createOpenAICompatible({
+    name: 'compat',
+    baseURL,
+    apiKey: process.env.OPENAI_COMPAT_API_KEY,
+  }).languageModel(spec.slice('compat:'.length));
 }

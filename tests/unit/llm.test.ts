@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { z } from 'zod';
-import { modelSpec } from '../../src/server/llm/registry.js';
+import { modelFor, modelSpec } from '../../src/server/llm/registry.js';
 import { generateStructured, streamChat } from '../../src/server/llm/stream.js';
 import { fakeRequests, resetFake, setFakeScript } from '../../src/server/llm/fake.js';
 
@@ -25,12 +25,33 @@ const base = (signal = new AbortController().signal) => ({
 
 describe('modelSpec', () => {
   it('defaults and overrides', () => {
-    expect(modelSpec('agent', 'maya')).toBe('openai:gpt-6-luna');
+    expect(modelSpec('agent', 'maya')).toBe('openai:gpt-5.6-luna');
+    expect(modelSpec('gate')).toBe('openai:gpt-5.6-luna');
+    expect(modelSpec('classifier')).toBe('openai:gpt-5.6-luna');
     expect(modelSpec('judge')).toBe('openai:gpt-6-sol');
     process.env.MODEL_AGENT_MAYA = 'fake:maya';
     expect(modelSpec('agent', 'maya')).toBe('fake:maya');
     process.env.MODEL_AGENT = 'anthropic:claude-haiku-5-5';
     expect(modelSpec('agent', 'theo')).toBe('anthropic:claude-haiku-5-5');
+  });
+});
+
+describe('modelFor compat', () => {
+  afterEach(() => {
+    delete process.env.OPENAI_COMPAT_BASE_URL;
+  });
+
+  it('throws without OPENAI_COMPAT_BASE_URL', () => {
+    delete process.env.OPENAI_COMPAT_BASE_URL;
+    process.env.MODEL_GATE = 'compat:llama3';
+    expect(() => modelFor('gate')).toThrow(/OPENAI_COMPAT_BASE_URL/);
+  });
+
+  it('builds a model when the base URL is set', () => {
+    process.env.OPENAI_COMPAT_BASE_URL = 'http://example.test/v1';
+    process.env.MODEL_GATE = 'compat:llama3';
+    const m = modelFor('gate');
+    expect(typeof m === 'object' && m.modelId).toBe('llama3');
   });
 });
 
