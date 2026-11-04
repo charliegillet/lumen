@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { openDb, type Db } from '../../src/server/db.js';
 import { ConversationActor } from '../../src/server/actor.js';
 import { resetFake, setFakeScript, type FakeReply } from '../../src/server/llm/fake.js';
-import { BUDGET, GATE_TIMEOUT_MS, runTurn } from '../../src/server/orchestrator/turn.js';
+import { BUDGET, GATE_TIMEOUT_MS, SMALL_TALK_CAPS, runTurn } from '../../src/server/orchestrator/turn.js';
 import type { AgentId, ConvEvent } from '../../src/shared/events.js';
 
 // Lets a test make chosen structured calls (gate/dedup) hang until their
@@ -189,6 +189,54 @@ describe('runTurn', () => {
     });
     await runTurn(actor, { triggerMessageId: 'u1', forced: ['priya'] });
     expect(started().map((e) => [e.agentId, e.hop])).toEqual([['priya', 0]]);
+  });
+
+  describe('small talk', () => {
+    const say = (text: string) => {
+      actor.append({ type: 'user_message', messageId: 'u2', clientMsgId: 'cm2', text });
+    };
+    const eager = () =>
+      script({
+        gate: (id, n) => (n === 0 ? { should_respond: true, novelty: 3, gist: `${id} take` } : QUIET),
+        reply: (id) => ({ chunks: [id === 'maya' ? '@Theo ' : '', 'hello!'], delayMs: 5 }),
+      });
+
+    it('greeting with three eager bidders: at most 2 speakers, no further hops, low effort', async () => {
+      eager();
+      say('Hi all!');
+      await runTurn(actor, { triggerMessageId: 'u2', forced: [] });
+      expect(started().length).toBeLessThanOrEqual(SMALL_TALK_CAPS.greeting);
+      expect(started().length).toBeGreaterThanOrEqual(1);
+      expect(started().every((e) => e.hop === 0)).toBe(true);
+    });
+
+    it('thanks gets exactly one reply', async () => {
+      eager();
+      say('thanks!');
+      await runTurn(actor, { triggerMessageId: 'u2', forced: [] });
+      expect(started()).toHaveLength(1);
+    });
+
+    it('thanks with every agent quiet still gets one reply', async () => {
+      script({ gate: () => QUIET, reply: () => ({ chunks: ['Anytime.'], delayMs: 5 }) });
+      say('Thanks!');
+      await runTurn(actor, { triggerMessageId: 'u2', forced: [] });
+      expect(started()).toHaveLength(1);
+    });
+
+    it('an @mentioned agent takes the only slot', async () => {
+      eager();
+      say('thanks @Priya');
+      await runTurn(actor, { triggerMessageId: 'u2', forced: ['priya'] });
+      expect(started().map((e) => e.agentId)).toEqual(['priya']);
+    });
+
+    it('a greeting with a real question is unaffected', async () => {
+      eager();
+      say('hi all, will we keep Northwind?');
+      await runTurn(actor, { triggerMessageId: 'u2', forced: [] });
+      expect(started().length).toBeGreaterThan(SMALL_TALK_CAPS.greeting);
+    });
   });
 
   describe('exchange terminates', () => {

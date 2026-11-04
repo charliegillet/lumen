@@ -5,11 +5,14 @@ import type { ConversationActor } from '../actor.js';
 import { AGENT_IDS } from '../agents/personas.js';
 import { clusterGists, selectSpeakers } from './dedup.js';
 import { runGate, type Bid } from './gate.js';
+import { smallTalkKind } from './smalltalk.js';
 import { startGeneration, type Generation } from './generation.js';
 
 export const BUDGET = { maxAgentMessages: 7, maxHops: 3, turnTimeoutMs: 90_000 };
 /** Per-call cap on one gate or dedup request, so one hung call cannot stall a wave. */
 export const GATE_TIMEOUT_MS = 8000;
+/** Most agents that answer a phatic user message; the turn ends after wave 0. */
+export const SMALL_TALK_CAPS = { greeting: 2, thanks: 1, ack: 1 } as const;
 
 const isAbort = (e: unknown) => e instanceof Error && e.name === 'AbortError';
 
@@ -61,6 +64,9 @@ async function waves(
   let lastWave: AgentId[] = [];
   let lastSpoken: Spoken[] = [];
   let started = 0;
+  const trigger = actor.view.messages.find((m) => m.id === triggerMessageId);
+  const kind = trigger?.author.kind === 'user' ? smallTalkKind(trigger.text) : null;
+  const smallCap = kind ? SMALL_TALK_CAPS[kind] : Infinity;
 
   while (hop <= BUDGET.maxHops && started < BUDGET.maxAgentMessages && inTime() && !signal.aborted) {
     const live = new Set([...actor.generations.values()].map((g) => g.agentId));
@@ -86,7 +92,9 @@ async function waves(
       hop,
       excluded: hop > 0 ? lastWave : [],
     });
-    const speakers = cutToBudget(selected, forcedNow, BUDGET.maxAgentMessages - started);
+    const speakers = cutToBudget(selected, forcedNow, Math.min(BUDGET.maxAgentMessages, smallCap) - started).map(
+      (s) => (kind ? { ...s, effort: 'low' as const } : s),
+    );
     if (speakers.length === 0) return;
 
     const wave: { gen: Generation; addresses: Bid['addresses'] }[] = [];
@@ -122,6 +130,7 @@ async function waves(
     });
     if (signal.aborted) return;
 
+    if (kind) return; // small talk gets one light wave, no follow-ups
     forced = hop === BUDGET.maxHops ? [] : nextForced(lastSpoken);
     lastWave = wave.map((w) => w.gen.agentId);
     hop++;
