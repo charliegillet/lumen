@@ -41,6 +41,16 @@ async function allGrew(page: Page, ids: string[], gapMs = 400): Promise<boolean[
   return b.map((x, i) => x > a[i]!);
 }
 
+/** Thread rows top to bottom: an agent id, or the person's text. */
+const rowOrder = (page: Page) =>
+  page.locator('.thread > .row').evaluateAll((rows) =>
+    rows.map((r) => (r as HTMLElement).dataset.agent ?? `you: ${(r as HTMLElement).innerText.trim()}`),
+  );
+
+/** Is the thread scrolled to (near) the bottom? */
+const pinnedToBottom = (page: Page) =>
+  page.locator('.scroller').evaluate((el) => el.scrollHeight - el.scrollTop - el.clientHeight < 72);
+
 async function expectNoMechanismWords(page: Page) {
   const body = (await page.evaluate(() => document.body.innerText)).replaceAll('STEERED:', '');
   expect(body).not.toMatch(MECHANISM);
@@ -59,8 +69,19 @@ test('steer by name mid-stream', async ({ page }) => {
   await open(page);
   await say(page, LONG);
   await allStreaming(page);
+  const before = await rowOrder(page);
+  expect(before.indexOf('theo')).toBeLessThan(before.indexOf('priya'));
   await say(page, '@Theo shorter');
   await expect(bubbleOf(page, 'theo').filter({ hasText: 'STEERED:' })).toHaveCount(1);
+  // Theo's redirected answer now reads after the steer; the others stay above it.
+  const after = await rowOrder(page);
+  const steerAt = after.indexOf('you: @Theo shorter');
+  expect(steerAt).toBeGreaterThan(-1);
+  expect(after.indexOf('maya')).toBeLessThan(steerAt);
+  expect(after.indexOf('priya')).toBeLessThan(steerAt);
+  expect(after.indexOf('theo')).toBeGreaterThan(steerAt);
+  expect(after.filter((r) => r === 'theo')).toHaveLength(1); // same bubble, not a new one
+  await expect.poll(() => pinnedToBottom(page)).toBe(true);
   // Maya and Priya are still mid-stream and keep growing while Theo adjusts.
   expect(await allGrew(page, ['maya', 'priya'], 300)).toEqual([true, true]);
   await expect(stopBtn(page)).toBeVisible();
@@ -68,6 +89,10 @@ test('steer by name mid-stream', async ({ page }) => {
   await expect(bubbleOf(page, 'priya').filter({ hasText: 'STEERED:' })).toHaveCount(0);
   await expectNoMechanismWords(page);
   await expect(stopBtn(page)).toBeHidden({ timeout: 30_000 });
+  // The order survives a reload: it comes from the log.
+  const final = await rowOrder(page);
+  await page.reload();
+  await expect.poll(() => rowOrder(page)).toEqual(final);
 });
 
 test('stop everything', async ({ page }) => {

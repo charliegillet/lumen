@@ -40,8 +40,23 @@ const started = (seq: number, id: string, agentId: AgentId): ConvEvent =>
   });
 const delta = (seq: number, id: string, text: string, segment = 0): ConvEvent =>
   ev(seq, { type: 'token_delta', messageId: id, segment, offset: 0, text });
-const segStart = (seq: number, id: string, segment: number, truncateTo: number, mode: 'continue' | 'replace') =>
-  ev(seq, { type: 'message_segment_started', messageId: id, segment, contextCutoffSeq: seq - 1, truncateTo, mode });
+const segStart = (
+  seq: number,
+  id: string,
+  segment: number,
+  truncateTo: number,
+  mode: 'continue' | 'replace',
+  moved?: true,
+) =>
+  ev(seq, {
+    type: 'message_segment_started',
+    messageId: id,
+    segment,
+    contextCutoffSeq: seq - 1,
+    truncateTo,
+    mode,
+    ...(moved ? { moved } : {}),
+  });
 const completed = (seq: number, id: string) => ev(seq, { type: 'message_completed', messageId: id });
 const aborted = (seq: number, id: string, truncateTo: number) =>
   ev(seq, { type: 'message_aborted', messageId: id, reason: 'user_stop', truncateTo });
@@ -128,6 +143,47 @@ describe('client conversation state', () => {
     expect(shownMessages(s).map((m) => m.id)).toContain('B');
     s = apply(s, delta(9, 'B', 'Short.', 1), completed(10, 'B'));
     expect(shown(s, 'B')).toBe('Short.');
+  });
+
+  it('a moved segment puts the steered bubble below the steer, keeping freezes and pendings', () => {
+    // Own steer at Maya is confirmed; a second send is still unconfirmed.
+    let s = freezeFor(addPending(twoStreaming(), 'cmS', '@Maya shorter'), '@Maya shorter');
+    s = freezeFor(addPending(s, 'cmP', '@Theo and you?'), '@Theo and you?');
+    expect([...s.frozen.keys()].sort()).toEqual(['A', 'B']);
+    s = apply(s, user(6, 'S', 'cmS', '@Maya shorter'), delta(7, 'A', ' hidden'));
+    const keys = () => shownMessages(s).map((m) => m.key);
+    expect(keys()).toEqual(['cmu1', 'A', 'B', 'cmS', 'cmP']);
+
+    s = apply(s, segStart(8, 'A', 1, 'Maya says'.length, 'continue', true));
+    expect(keys()).toEqual(['cmu1', 'B', 'cmS', 'A', 'cmP']);
+    expect(msg(s, 'A')).toMatchObject({ anchorSeq: 8, startSeq: 2 });
+    expect(s.frozen.has('A')).toBe(false); // the moved bubble shows its new segment
+    expect(s.frozen.get('B')).toBe('Theo says'.length); // Theo stays frozen for the pending send
+    expect(shown(s, 'A')).toBe('Maya says');
+    expect(shownMessages(s).find((m) => m.key === 'cmP')).toMatchObject({ pending: true });
+
+    s = apply(s, delta(9, 'A', ' briefly', 1), delta(10, 'B', ' more'));
+    expect(shown(s, 'A')).toBe('Maya says briefly');
+    expect(shown(s, 'B')).toBe('Theo says');
+    s = apply(s, resolved(11, 'S', ['maya']));
+    expect(shown(s, 'B')).toBe('Theo says more');
+    s = apply(s, user(12, 'P', 'cmP', '@Theo and you?'));
+    expect(keys()).toEqual(['cmu1', 'B', 'cmS', 'A', 'cmP']);
+    expect(s.pendingSends).toHaveLength(0);
+  });
+
+  it('a moved replace keeps its words on screen at the new place', () => {
+    let s = freezeFor(twoStreaming(), '@Theo again');
+    s = apply(s, user(6, 'S'), segStart(7, 'B', 1, 0, 'replace', true));
+    expect(shownMessages(s).map((m) => m.key)).toEqual(['cmu1', 'A', 'cmS', 'B']);
+    expect(shown(s, 'B')).toBe('Theo says');
+    s = apply(s, delta(8, 'B', 'New', 1));
+    expect(shown(s, 'B')).toBe('New');
+  });
+
+  it('a segment without moved leaves the bubble in place', () => {
+    const s = apply(twoStreaming(), user(6, 'S'), segStart(7, 'A', 1, 4, 'continue'));
+    expect(shownMessages(s).map((m) => m.key)).toEqual(['cmu1', 'A', 'B', 'cmS']);
   });
 
   it('completion and abort unfreeze', () => {
