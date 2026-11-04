@@ -237,6 +237,18 @@ async function handle(
   await Promise.all([...waits, then?.()]);
 }
 
+/** Wording that marks a standing instruction even when the classifier could not say so. */
+const STANDING_WORDS = /\b(from now on|going forward|for the rest of|always|never again|from here on)\b/i;
+
+/**
+ * A failed or timed-out classifier falls back to one_off, which would drop a
+ * standing instruction; explicit standing wording keeps it standing.
+ */
+export function keepStanding(d: SteerDecision, text: string): SteerDecision {
+  if (d.scope !== 'one_off' || !STANDING_WORDS.test(text)) return d;
+  return { ...d, scope: 'standing', standing_text: text };
+}
+
 async function classify(
   actor: ConversationActor,
   i: SendInput,
@@ -255,20 +267,24 @@ async function classify(
       : [],
   );
   try {
-    return await classifySteer(
+    const d = await classifySteer(
       { text: i.text, streaming, recentlyFinished, instructions: actor.view.instructions },
       AbortSignal.timeout(CLASSIFY_TIMEOUT_MS),
     );
+    return keepStanding(d, i.text);
   } catch {
     // Timed out: same fallback classifySteer uses on failure.
-    return {
-      kind: streaming.length > 0 ? 'steer' : 'new_message',
-      targets: parseTargets(i.text).targets,
-      apply: 'continue',
-      scope: 'one_off',
-      standing_text: null,
-      revokes: [],
-    };
+    return keepStanding(
+      {
+        kind: streaming.length > 0 ? 'steer' : 'new_message',
+        targets: parseTargets(i.text).targets,
+        apply: 'continue',
+        scope: 'one_off',
+        standing_text: null,
+        revokes: [],
+      },
+      i.text,
+    );
   }
 }
 

@@ -3,7 +3,7 @@ import { openDb, type Db } from '../../src/server/db.js';
 import { ConversationActor } from '../../src/server/actor.js';
 import { fakeRequests, resetFake, setFakeScript, type FakeReply } from '../../src/server/llm/fake.js';
 import { startGeneration, type Generation } from '../../src/server/orchestrator/generation.js';
-import { handleStop, handleUserMessage, type SendInput } from '../../src/server/steering/handle.js';
+import { handleStop, handleUserMessage, keepStanding, type SendInput } from '../../src/server/steering/handle.js';
 import type { SteerDecision } from '../../src/server/steering/classify.js';
 import type { AgentId, ConvEvent } from '../../src/shared/events.js';
 
@@ -772,6 +772,29 @@ describe('standing instructions', () => {
     });
     expect(steerRequests('theo')[0]?.system).toContain('Keep it to one sentence.');
     expect(msg(theo.messageId)?.text).toContain('STEERED:');
+  });
+
+  it('a failing classifier still records explicit standing wording', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    setFakeScript((r) => (r.kind === 'classify' ? { error: 'classifier down' } : { chunks: ['ok'], delayMs: 1 }));
+    await (await send('from now on, everyone answer in French')).settled;
+    expect(events().find((e) => e.type === 'instruction_set')).toMatchObject({
+      scope: 'all',
+      text: 'from now on, everyone answer in French',
+    });
+    await (await send('what about pricing?')).settled;
+    expect(events().filter((e) => e.type === 'instruction_set')).toHaveLength(1);
+  });
+
+  it('a timed-out classifier keeps a named standing instruction scoped to that agent', () => {
+    const fallback = { ...NEW_MESSAGE, targets: ['theo'] as AgentId[] };
+    expect(keepStanding(fallback, '@Theo always keep it to one sentence')).toMatchObject({
+      scope: 'standing',
+      standing_text: '@Theo always keep it to one sentence',
+    });
+    expect(keepStanding(fallback, '@Theo keep it short')).toBe(fallback);
+    const standing = { ...NEW_MESSAGE, scope: 'standing' as const, standing_text: 'Be brief.' };
+    expect(keepStanding(standing, 'always be brief')).toBe(standing);
   });
 
   it('revokes remove an instruction', async () => {
