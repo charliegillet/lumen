@@ -1,14 +1,13 @@
 app = "lumen-group-chat"
 primary_region = "sjc"
 
-[build]
-
 [env]
   PORT = "8080"
   DB_PATH = "/data/chat.db"
   MODEL_AGENT = "openai:gpt-5.6-luna"
   MODEL_GATE = "openai:gpt-5.6-luna"
   MODEL_CLASSIFIER = "openai:gpt-5.6-luna"
+  MODEL_JUDGE = "openai:gpt-6-sol"
 
 [mounts]
   source = "chat_data"
