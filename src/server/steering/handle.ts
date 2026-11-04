@@ -193,7 +193,8 @@ async function handle(
       }
       if (want.length > 0) {
         const forced: AgentId[] = [];
-        for (const id of want) {
+        // Steered messages move below the steer; keep the order they were shown in.
+        for (const id of byPosition(actor, want)) {
           if (stoppedSince(actor, id, userSeq)) continue; // stopped after this steer was sent
           const g = steerAgent(actor, id, d.apply, i, sentAt);
           if (g) {
@@ -307,7 +308,7 @@ function steerAgent(
 
   const m = latestBy(actor, agentId);
   if (!m || !justFinished(m, i.typingStartedAt, sentAt) || actor.generations.has(m.id)) return null;
-  const g = reopenGeneration(actor, m.id, [i.text]);
+  const g = reopenGeneration(actor, m.id, [i.text], { moved: true });
   pending.set(g, { segment: g.segment, mode: 'replace', keep: 0, steers: [i.text], startSeq: actor.lastSeq });
   return g;
 }
@@ -325,7 +326,7 @@ function restartLive(actor: ConversationActor, g: Generation, apply: 'continue' 
   const mode = merge && p.mode === 'replace' ? 'replace' : apply;
   const keep =
     mode === 'replace' ? 0 : merge ? p.keep : shown(i.rendered, g.messageId, g.textSoFar().length);
-  if (!g.restart(mode, keep, steers)) return false;
+  if (!g.restart(mode, keep, steers, { moved: true })) return false;
   pending.set(g, { segment: g.segment, mode, keep, steers, startSeq: actor.lastSeq });
   return true;
 }
@@ -366,7 +367,8 @@ async function judgeAndRetry(actor: ConversationActor, g: Generation): Promise<v
   if (stoppedSince(actor, g.agentId, p.startSeq) || undecided) return;
   if (latestBy(actor, g.agentId)?.id !== g.messageId) return;
   if (!now || now.status !== 'done' || now.segment !== p.segment || actor.generations.has(g.messageId)) return;
-  await reopenGeneration(actor, g.messageId, p.steers).done; // final, not judged again
+  // Not caused by a new user message: the answer stays where it is.
+  await reopenGeneration(actor, g.messageId, p.steers, { moved: false }).done; // final, not judged again
 }
 
 async function complies(steers: string[], text: string): Promise<boolean> {
@@ -418,8 +420,23 @@ function justFinished(m: MessageView | undefined, typingStartedAt: number | null
 }
 
 const byId = (a: ConversationActor, id: string) => a.view.messages.find((m) => m.id === id);
-const latestBy = (a: ConversationActor, id: AgentId) =>
-  a.view.messages.findLast((m) => m.author.kind === 'agent' && m.author.agentId === id);
+/** The agent's most recently started message (display order can differ once steers move messages). */
+function latestBy(a: ConversationActor, id: AgentId): MessageView | undefined {
+  let found: MessageView | undefined;
+  for (const m of a.view.messages) {
+    if (m.author.kind === 'agent' && m.author.agentId === id && (!found || m.startSeq > found.startSeq)) found = m;
+  }
+  return found;
+}
+/** Agents sorted by where their live (or latest) message is shown. */
+function byPosition(a: ConversationActor, ids: AgentId[]): AgentId[] {
+  const pos = (id: AgentId) => {
+    const mid = liveBy(a, id)?.messageId ?? latestBy(a, id)?.id;
+    const i = mid === undefined ? -1 : a.view.messages.findIndex((m) => m.id === mid);
+    return i < 0 ? Number.POSITIVE_INFINITY : i;
+  };
+  return [...ids].sort((x, y) => pos(x) - pos(y));
+}
 function liveBy(a: ConversationActor, id: AgentId): Generation | undefined {
   let found: Generation | undefined;
   for (const g of a.generations.values()) if (g.agentId === id) found = g;

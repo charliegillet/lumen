@@ -45,6 +45,16 @@ interface ReopenArgs {
   effort: Effort;
   segment: number;
   steers: string[];
+  moved: boolean;
+}
+
+/**
+ * `moved`: a user steer caused this segment, so the message moves below that
+ * steer in the chat. A segment the system starts on its own (the compliance
+ * redo) leaves the message where it is.
+ */
+export interface SegmentOptions {
+  moved: boolean;
 }
 
 export interface StartArgs {
@@ -126,6 +136,7 @@ export class Generation {
       contextCutoffSeq: cutoff,
       truncateTo: 0,
       mode: 'replace',
+      ...movedField(r.moved),
     });
     this.launch(this.current, 'replace', cutoff, { kind: 'replace', steers: r.steers, effort: r.effort });
   }
@@ -152,7 +163,12 @@ export class Generation {
    * `continue` keeps text[0, truncateTo); `replace` starts empty.
    * Returns false (and does nothing) once the generation is terminal.
    */
-  restart(mode: 'continue' | 'replace', truncateTo: number, steers: string[]): boolean {
+  restart(
+    mode: 'continue' | 'replace',
+    truncateTo: number,
+    steers: string[],
+    opts: SegmentOptions = { moved: false },
+  ): boolean {
     if (this.terminal) return false;
     const committed = this.textSoFar();
     const keep = mode === 'continue' ? clamp(truncateTo, committed.length) : 0;
@@ -174,6 +190,7 @@ export class Generation {
         contextCutoffSeq: cutoff,
         truncateTo: keep,
         mode,
+        ...movedField(opts.moved),
       });
     } catch (err) {
       this.terminal = true;
@@ -396,6 +413,9 @@ function newSegment(segment: number, partial: string, restore = ''): Segment {
   };
 }
 
+/** The event carries `moved` only when set, so unmoved segments look as they always did. */
+const movedField = (moved: boolean) => (moved ? { moved: true as const } : {});
+
 const clamp = (n: number, max: number) => Math.min(Math.max(0, n), max);
 const WS_END = /\s$/;
 const WS_START = /^\s+/;
@@ -444,7 +464,12 @@ export function startGeneration(actor: ConversationActor, a: StartArgs): Generat
  * segment streams into the same messageId with the steers as the final ask.
  * Throws if the message is unknown, not an agent's, or still live.
  */
-export function reopenGeneration(actor: ConversationActor, messageId: string, steers: string[]): Generation {
+export function reopenGeneration(
+  actor: ConversationActor,
+  messageId: string,
+  steers: string[],
+  opts: SegmentOptions = { moved: false },
+): Generation {
   const m = actor.view.messages.find((x) => x.id === messageId);
   if (!m || m.author.kind !== 'agent') throw new Error(`reopen: no agent message ${messageId}`);
   if (m.status === 'streaming' || actor.generations.has(messageId)) {
@@ -453,6 +478,6 @@ export function reopenGeneration(actor: ConversationActor, messageId: string, st
   const startEv = actor.eventsUpTo(m.startSeq).at(-1);
   const effort: Effort = startEv?.type === 'message_started' ? startEv.effort : 'low';
   return new Generation(actor, {
-    reopen: { messageId, agentId: m.author.agentId, hop: m.hop, effort, segment: m.segment + 1, steers },
+    reopen: { messageId, agentId: m.author.agentId, hop: m.hop, effort, segment: m.segment + 1, steers, moved: opts.moved },
   });
 }

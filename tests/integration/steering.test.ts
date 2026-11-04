@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { openDb, type Db } from '../../src/server/db.js';
 import { ConversationActor } from '../../src/server/actor.js';
 import { fakeRequests, resetFake, setFakeScript, type FakeReply } from '../../src/server/llm/fake.js';
+import { buildPrompt } from '../../src/server/agents/prompt.js';
 import { startGeneration, type Generation } from '../../src/server/orchestrator/generation.js';
 import { handleStop, handleUserMessage, keepStanding, type SendInput } from '../../src/server/steering/handle.js';
 import type { SteerDecision } from '../../src/server/steering/classify.js';
@@ -519,6 +520,155 @@ describe('compliance retry', () => {
     const g = startAll();
     await Promise.all(Object.values(g).map((x) => x.done));
     expect(fakeRequests.some((r) => r.kind === 'judge')).toBe(false);
+  });
+});
+
+describe('display order', () => {
+  const order = () => actor.view.messages.map((m) => m.id);
+  const userId = (text: string) => actor.view.messages.find((m) => m.author.kind === 'user' && m.text === text)!.id;
+  const anchorsSorted = () => {
+    const a = actor.view.messages.map((m) => m.anchorSeq);
+    return a.every((x, i) => i === 0 || a[i - 1]! < x);
+  };
+
+  it('a steered agent moves below the steer; the others keep their place', async () => {
+    const g = startAll();
+    await waitFor(() => g.theo.textSoFar().length > 0);
+    const before = g.theo.textSoFar();
+    s.classify = () => steer(['theo']);
+    await (await send('@Theo focus only on the risks')).settled;
+    await idle();
+
+    const steerMsg = userId('@Theo focus only on the risks');
+    expect(order()).toEqual(['u1', g.maya.messageId, g.priya.messageId, steerMsg, g.theo.messageId]);
+    const seg = segmentsFor(g.theo.messageId)[0]!;
+    expect(seg).toMatchObject({ moved: true, mode: 'continue' });
+    const theo = msg(g.theo.messageId)!;
+    expect(theo.anchorSeq).toBe(seg.seq);
+    expect(theo.startSeq).toBeLessThan(msg(steerMsg)!.startSeq);
+    expect(theo.text.startsWith(before)).toBe(true); // same answer, prefix kept
+    expect(startedBy('theo')).toHaveLength(1);
+    expect(anchorsSorted()).toBe(true);
+  });
+
+  it('a merged second steer moves the message below both', async () => {
+    const g = startAll();
+    await waitFor(() => g.theo.textSoFar().length > 0);
+    s.classify = () => steer(['theo']);
+    const a = await send('@Theo shorter');
+    const b = await send('@Theo mention pricing');
+    await Promise.all([a.settled, b.settled]);
+    await idle();
+    expect(segmentsFor(g.theo.messageId).every((e) => e.type === 'message_segment_started' && e.moved)).toBe(true);
+    expect(order()).toEqual([
+      'u1',
+      g.maya.messageId,
+      g.priya.messageId,
+      userId('@Theo shorter'),
+      userId('@Theo mention pricing'),
+      g.theo.messageId,
+    ]);
+  });
+
+  it('a broadcast steer moves everyone below it, in the order they were shown', async () => {
+    const g = startAll();
+    await waitFor(() => Object.values(g).every((x) => x.textSoFar().length > 0));
+    s.classify = () => steer(['priya', 'theo', 'maya']);
+    await (await send('everyone keep it short')).settled;
+    await idle();
+    expect(order()).toEqual(['u1', userId('everyone keep it short'), g.maya.messageId, g.theo.messageId, g.priya.messageId]);
+    expect(anchorsSorted()).toBe(true);
+  });
+
+  it('a stop moves nothing', async () => {
+    const g = startAll();
+    await waitFor(() => g.theo.textSoFar().length > 0);
+    await (await send('@Theo stop')).settled;
+    await idle();
+    expect(order()).toEqual(['u1', g.maya.messageId, g.theo.messageId, g.priya.messageId, userId('@Theo stop')]);
+  });
+
+  it('the compliance redo does not move the answer', async () => {
+    s.judge = () => ({ object: { complies: false } });
+    let releaseJudge!: () => void;
+    let judgeStarted = false;
+    hooks.before = (meta) => {
+      if (meta.kind !== 'judge') return undefined;
+      judgeStarted = true;
+      return new Promise<void>((r) => (releaseJudge = r));
+    };
+    const theo = start('theo');
+    await waitFor(() => theo.textSoFar().length > 0);
+    s.classify = () => steer(['theo']);
+    const r = await send('@Theo one sentence');
+    await waitFor(() => judgeStarted);
+    // Someone else speaks after Theo's steered answer, before the redo.
+    actor.append({
+      type: 'message_started',
+      messageId: 'later',
+      agentId: 'priya',
+      turnId: 't2',
+      hop: 0,
+      replyTo: null,
+      contextCutoffSeq: actor.lastSeq,
+      effort: 'low',
+    });
+    actor.append({ type: 'token_delta', messageId: 'later', segment: 0, offset: 0, text: 'Priya here.' });
+    actor.append({ type: 'message_completed', messageId: 'later' });
+    releaseJudge();
+    await r.settled;
+    await idle();
+
+    const segs = segmentsFor(theo.messageId);
+    expect(segs).toHaveLength(2);
+    expect(segs[0]).toMatchObject({ moved: true });
+    expect(segs[1]).not.toHaveProperty('moved');
+    expect(msg(theo.messageId)?.anchorSeq).toBe(segs[0]!.seq);
+    expect(order()).toEqual(['u1', userId('@Theo one sentence'), theo.messageId, 'later']);
+  });
+
+  it('a late steer that reopens a finished answer moves it below the steer', async () => {
+    const theo = start('theo');
+    await theo.done;
+    const maya = start('maya');
+    await maya.done;
+    s.classify = () => steer(['theo']);
+    await (await send('@Theo shorter')).settled;
+    await idle();
+
+    const segs = segmentsFor(theo.messageId);
+    expect(segs).toHaveLength(1);
+    expect(segs[0]).toMatchObject({ mode: 'replace', moved: true });
+    expect(order()).toEqual(['u1', maya.messageId, userId('@Theo shorter'), theo.messageId]);
+    expect(msg(theo.messageId)?.text).toBe(STEERED.join(''));
+  });
+
+  it('other agents see the moved answer after the steer; reload agrees', async () => {
+    const g = startAll();
+    await waitFor(() => g.theo.textSoFar().length > 0);
+    s.classify = () => steer(['theo']);
+    await (await send('@Theo focus only on the risks')).settled;
+    await idle();
+
+    const cutoff = actor.lastSeq;
+    const p = buildPrompt('maya', actor.eventsUpTo(cutoff), cutoff, {
+      kind: 'reply',
+      gist: 'x',
+      effort: 'low',
+      hop: 1,
+      othersReplying: [],
+    });
+    const history = JSON.stringify(p.messages);
+    const steerAt = history.indexOf('@Theo focus only on the risks');
+    const theoAt = history.indexOf('STEERED:');
+    expect(steerAt).toBeGreaterThan(-1);
+    expect(theoAt).toBeGreaterThan(steerAt);
+    expect(history.indexOf(unsteeredText('priya'))).toBeLessThan(steerAt);
+    // Theo's own steered prompt still carried the steer as the final ask.
+    expect(steerRequests('theo')[0]?.prompt).toContain('focus only on the risks');
+
+    const fresh = new ConversationActor(db, 'c1');
+    expect(fresh.view).toEqual(actor.view);
   });
 });
 

@@ -506,6 +506,26 @@ describe('continuation seam helpers', () => {
   });
 });
 
+describe('moved segments', () => {
+  it('restart and reopen mark the segment moved only when asked', async () => {
+    setFakeScript((r) =>
+      r.kind === 'reply' ? { chunks: ['a ', 'b ', 'c ', 'd '], delayMs: 30 } : { chunks: ['x.'], delayMs: 5 },
+    );
+    const g = start('theo');
+    await waitFor(() => g.textSoFar().length > 0);
+    expect(g.restart('continue', 1, ['one'])).toBe(true);
+    expect(g.restart('continue', 1, ['two'], { moved: true })).toBe(true);
+    await g.done;
+    const r1 = reopenGeneration(actor, g.messageId, ['three'], { moved: true });
+    await r1.done;
+    const r2 = reopenGeneration(actor, g.messageId, ['four']);
+    await r2.done;
+    const segs = eventsFor(g).filter((e) => e.type === 'message_segment_started');
+    expect(segs.map((e) => ('moved' in e ? e.moved : undefined))).toEqual([undefined, true, true, undefined]);
+    expect(msg(g)?.anchorSeq).toBe(segs[2]!.seq);
+  });
+});
+
 describe('reopenGeneration', () => {
   it('rewrites a completed message in place with a replace segment', async () => {
     setFakeScript((r) =>
