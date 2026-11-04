@@ -786,14 +786,22 @@ describe('standing instructions', () => {
     expect(events().filter((e) => e.type === 'instruction_set')).toHaveLength(1);
   });
 
+  it('a real one_off answer stays one-off even with "always" in it', async () => {
+    s.classify = () => NEW_MESSAGE;
+    await (await send('do we always ship on Fridays?')).settled;
+    expect(events().some((e) => e.type === 'instruction_set')).toBe(false);
+    expect(actor.view.instructions).toEqual([]);
+    expect(keepStanding(NEW_MESSAGE, 'do we always ship on Fridays?')).toBe(NEW_MESSAGE);
+  });
+
   it('a timed-out classifier keeps a named standing instruction scoped to that agent', () => {
-    const fallback = { ...NEW_MESSAGE, targets: ['theo'] as AgentId[] };
+    const fallback = { ...NEW_MESSAGE, targets: ['theo'] as AgentId[], fallback: true as const };
     expect(keepStanding(fallback, '@Theo always keep it to one sentence')).toMatchObject({
       scope: 'standing',
       standing_text: '@Theo always keep it to one sentence',
     });
     expect(keepStanding(fallback, '@Theo keep it short')).toBe(fallback);
-    const standing = { ...NEW_MESSAGE, scope: 'standing' as const, standing_text: 'Be brief.' };
+    const standing = { ...NEW_MESSAGE, scope: 'standing' as const, standing_text: 'Be brief.', fallback: true as const };
     expect(keepStanding(standing, 'always be brief')).toBe(standing);
   });
 

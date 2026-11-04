@@ -16,6 +16,7 @@ describe('classifySteer', () => {
     setFakeScript(() => ({ object: { kind: 'bogus' } }));
     expect(await classifySteer(base)).toEqual({
       kind: 'new_message', targets: ['theo'], apply: 'continue', scope: 'one_off', standing_text: null, revokes: [],
+      fallback: true,
     });
   });
 
@@ -24,6 +25,7 @@ describe('classifySteer', () => {
     const d = await classifySteer({ ...base, streaming: [{ agentId: 'theo', partial: 'Well' }] });
     expect(d.kind).toBe('steer');
     expect(d.targets).toEqual(['theo']);
+    expect(d.fallback).toBe(true);
   });
 
   it('guides stop-like openers followed by an instruction to steer', async () => {

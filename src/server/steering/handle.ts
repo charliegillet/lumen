@@ -8,7 +8,7 @@ import { AGENT_IDS } from '../agents/personas.js';
 import { generateStructured } from '../llm/stream.js';
 import { reopenGeneration, type Generation } from '../orchestrator/generation.js';
 import { runTurn } from '../orchestrator/turn.js';
-import { classifySteer, type SteerDecision } from './classify.js';
+import { classifySteer, type ClassifiedSteer, type SteerDecision } from './classify.js';
 
 /** A finished message is rewritten in place when a steer lands this soon after it. */
 export const REWRITE_WINDOW_MS = 2000;
@@ -242,10 +242,11 @@ const STANDING_WORDS = /\b(from now on|going forward|for the rest of|always|neve
 
 /**
  * A failed or timed-out classifier falls back to one_off, which would drop a
- * standing instruction; explicit standing wording keeps it standing.
+ * standing instruction; explicit standing wording keeps it standing. Only
+ * fallbacks are touched: a real one_off answer ("do we always…?") stands.
  */
-export function keepStanding(d: SteerDecision, text: string): SteerDecision {
-  if (d.scope !== 'one_off' || !STANDING_WORDS.test(text)) return d;
+export function keepStanding(d: ClassifiedSteer, text: string): ClassifiedSteer {
+  if (!d.fallback || d.scope !== 'one_off' || !STANDING_WORDS.test(text)) return d;
   return { ...d, scope: 'standing', standing_text: text };
 }
 
@@ -282,6 +283,7 @@ async function classify(
         scope: 'one_off',
         standing_text: null,
         revokes: [],
+        fallback: true,
       },
       i.text,
     );

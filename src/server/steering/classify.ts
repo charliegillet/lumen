@@ -14,6 +14,8 @@ export const SteerDecisionSchema = z.object({
   revokes: z.array(z.string()),
 });
 export type SteerDecision = z.infer<typeof SteerDecisionSchema>;
+/** A decision, marked `fallback` when no classifier answer was usable. */
+export type ClassifiedSteer = SteerDecision & { fallback?: true };
 
 export interface SteerInput {
   text: string;
@@ -54,7 +56,7 @@ function buildPrompt(a: SteerInput): string {
   ].join('\n\n');
 }
 
-export async function classifySteer(a: SteerInput, signal?: AbortSignal): Promise<SteerDecision> {
+export async function classifySteer(a: SteerInput, signal?: AbortSignal): Promise<ClassifiedSteer> {
   try {
     const raw = await generateStructured({
       role: 'classifier',
@@ -82,6 +84,7 @@ export async function classifySteer(a: SteerInput, signal?: AbortSignal): Promis
       scope: 'one_off',
       standing_text: null,
       revokes: [],
+      fallback: true,
     };
   }
 }
