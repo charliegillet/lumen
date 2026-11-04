@@ -139,3 +139,53 @@ describe('reasoning', () => {
     expect(fakeRequests[1]?.reasoning ?? 'provider-default').toBe('provider-default');
   });
 });
+
+describe('structured call reasoning', () => {
+  const call = (kind: 'gate' | 'dedup' | 'classify' | 'judge') =>
+    generateStructured({
+      role: kind === 'gate' || kind === 'dedup' ? 'gate' : 'classifier',
+      system: 's',
+      prompt: 'p',
+      schema: z.object({ ok: z.boolean() }),
+      meta: { kind },
+    });
+  beforeEach(() => {
+    process.env.MODEL_GATE = 'fake:x';
+    process.env.MODEL_CLASSIFIER = 'fake:x';
+    setFakeScript(() => ({ object: { ok: true } }));
+  });
+
+  it('gate, dedup and classify ask for no reasoning; the judge keeps the default', async () => {
+    for (const k of ['gate', 'dedup', 'classify', 'judge'] as const) await call(k);
+    expect(fakeRequests.map((r) => r.reasoning ?? 'provider-default')).toEqual([
+      'none',
+      'none',
+      'none',
+      'provider-default',
+    ]);
+  });
+
+  it('follows the compat / MODEL_REASONING=off rule', async () => {
+    process.env.MODEL_REASONING = 'off';
+    await call('classify');
+    expect(fakeRequests[0]?.reasoning ?? 'provider-default').toBe('provider-default');
+  });
+
+  it('logs classify latency outside tests only', async () => {
+    const info = vi.spyOn(console, 'info').mockImplementation(() => {});
+    await call('classify');
+    expect(info).not.toHaveBeenCalled();
+    const saved = { NODE_ENV: process.env.NODE_ENV, VITEST: process.env.VITEST };
+    delete process.env.NODE_ENV;
+    delete process.env.VITEST;
+    try {
+      await call('classify');
+      await call('gate');
+    } finally {
+      for (const [k, v] of Object.entries(saved)) if (v !== undefined) process.env[k] = v;
+    }
+    expect(info).toHaveBeenCalledTimes(1);
+    expect(info.mock.calls[0]?.[0]).toMatch(/^classify model=fake:x ok=true ms=\d+$/);
+    info.mockRestore();
+  });
+});

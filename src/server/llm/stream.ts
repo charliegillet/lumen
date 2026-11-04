@@ -129,6 +129,9 @@ function abortError(): Error {
   return e;
 }
 
+/** Calls on the steer and turn critical path skip reasoning; the judge keeps the provider default. */
+const FAST_KINDS: ReadonlySet<ReqMeta['kind']> = new Set(['gate', 'dedup', 'classify']);
+
 export async function generateStructured<T>(a: {
   role: Role;
   system: string;
@@ -137,14 +140,30 @@ export async function generateStructured<T>(a: {
   meta: ReqMeta;
 } & ({ prompt: string; messages?: undefined } | { messages: ModelMessage[]; prompt?: undefined })): Promise<T> {
   const input = a.messages ? { messages: a.messages } : { prompt: a.prompt as string };
-  const { output } = await generateText({
-    model: modelFor(a.role, a.meta.agentId),
-    system: a.system,
-    ...input,
-    output: Output.object({ schema: a.schema }),
-    abortSignal: a.signal,
-    headers: metaHeaders(a.meta),
-    maxRetries: 0,
-  });
-  return output as T;
+  const spec = modelSpec(a.role, a.meta.agentId);
+  const reasoning = FAST_KINDS.has(a.meta.kind) ? reasoningFor(spec, 'none') : undefined;
+  const t0 = performance.now();
+  let ok = false;
+  try {
+    const { output } = await generateText({
+      model: modelFor(a.role, a.meta.agentId),
+      system: a.system,
+      ...input,
+      output: Output.object({ schema: a.schema }),
+      abortSignal: a.signal,
+      ...(reasoning ? { reasoning } : {}),
+      headers: metaHeaders(a.meta),
+      maxRetries: 0,
+    });
+    ok = true;
+    return output as T;
+  } finally {
+    if (a.meta.kind === 'classify') logLatency(spec, t0, ok);
+  }
+}
+
+/** One line per classify call, like the ttft log; silent under tests. */
+function logLatency(spec: string, t0: number, ok: boolean): void {
+  if (process.env.NODE_ENV === 'test' || process.env.VITEST) return;
+  console.info(`classify model=${spec} ok=${ok} ms=${Math.round(performance.now() - t0)}`);
 }
