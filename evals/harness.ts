@@ -38,7 +38,7 @@ export class Chat {
   /** Sends without waiting for the agents. */
   async send(
     text: string,
-    rendered: Record<string, number> = {},
+    rendered?: Record<string, number>,
     typingStartedAt: number | null = null,
   ): Promise<number> {
     if (this.overDeadline()) return this.actor.lastSeq;
@@ -122,7 +122,7 @@ export class Chat {
   }
 
   stop(): void {
-    handleStop(this.actor, { clientReqId: `eval-stop-${randomUUID()}`, rendered: {} });
+    handleStop(this.actor, { clientReqId: `eval-stop-${randomUUID()}`, rendered: undefined });
   }
 
   close(): void {

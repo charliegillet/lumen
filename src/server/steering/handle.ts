@@ -22,8 +22,12 @@ export interface SendInput {
   clientMsgId: string;
   text: string;
   typingStartedAt: number | null;
-  /** messageId -> chars the client has displayed */
-  rendered: Record<string, number>;
+  /**
+   * messageId -> chars the client has displayed. When given, a live message
+   * missing from it was not on screen at all (0 chars); when absent, the
+   * committed text counts as seen.
+   */
+  rendered?: Record<string, number>;
 }
 
 /** Steers applied to a generation's current segment, for debouncing and the judge. */
@@ -105,7 +109,7 @@ export async function handleUserMessage(
  */
 export function handleStop(
   actor: ConversationActor,
-  i: { clientReqId: string; rendered: Record<string, number> },
+  i: { clientReqId: string; rendered?: Record<string, number> },
   stampSeq?: number,
 ): { seq: number | null } {
   const prior = actor.findStopAll(i.clientReqId);
@@ -390,7 +394,12 @@ async function complies(steers: string[], text: string): Promise<boolean> {
 // ---------------------------------------------------------------------------
 
 /** `stampSeq` as in handleStop; defaults to the log head after the stop. */
-function stopAt(actor: ConversationActor, g: Generation, rendered: Record<string, number>, stampSeq?: number): void {
+function stopAt(
+  actor: ConversationActor,
+  g: Generation,
+  rendered: Record<string, number> | undefined,
+  stampSeq?: number,
+): void {
   try {
     g.stop(shown(rendered, g.messageId, g.textSoFar().length));
   } catch (err) {
@@ -408,10 +417,16 @@ const startedAfter = (a: ConversationActor, id: AgentId, seq: number) =>
 const startable = (a: ConversationActor, id: AgentId, seq: number) =>
   !stoppedSince(a, id, seq) && !startedAfter(a, id, seq);
 
-/** Chars the client displayed, or `fallback` when it sent nothing usable. */
-function shown(rendered: Record<string, number>, messageId: string, fallback: number): number {
+/**
+ * Chars the client displayed, at most `fallback` (the committed length). A
+ * client that sent a `rendered` map without this message had not shown any of
+ * it (e.g. it had not received message_started yet): 0. Only a request with no
+ * map at all falls back to the committed text.
+ */
+export function shown(rendered: Record<string, number> | undefined, messageId: string, fallback: number): number {
+  if (rendered === undefined || rendered === null || typeof rendered !== 'object') return fallback;
   const n = rendered[messageId];
-  return typeof n === 'number' && Number.isFinite(n) ? Math.min(Math.max(0, Math.floor(n)), fallback) : fallback;
+  return typeof n === 'number' && Number.isFinite(n) ? Math.min(Math.max(0, Math.floor(n)), fallback) : 0;
 }
 
 function justFinished(m: MessageView | undefined, typingStartedAt: number | null, now: number): boolean {

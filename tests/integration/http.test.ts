@@ -209,10 +209,13 @@ describe('commands', () => {
     expect(inf.status).toBe(400);
     const res = await app.request('/api/conv/c1/messages', { method: 'POST', body: 'not json' });
     expect(res.status).toBe(400);
-    // rendered optional, defaults to {}
+    // rendered optional: absent stays undefined (committed text counts as seen); {} is passed on as given
     const ok = await post('/api/conv/c1/messages', { clientMsgId: 'ok', text: 'hi', typingStartedAt: 123 });
     expect(ok.status).toBe(200);
-    expect(handle.lastInput).toMatchObject({ rendered: {}, typingStartedAt: 123 });
+    expect(handle.lastInput).toMatchObject({ typingStartedAt: 123 });
+    expect((handle.lastInput as { rendered?: unknown }).rendered).toBeUndefined();
+    await post('/api/conv/c1/messages', { clientMsgId: 'ok2', text: 'hi', typingStartedAt: null, rendered: {} });
+    expect((handle.lastInput as { rendered?: unknown }).rendered).toEqual({});
   });
 
   it('shifts typingStartedAt by the client clock offset from sentAt', async () => {
@@ -236,6 +239,7 @@ describe('commands', () => {
   it('stop validates and is idempotent', async () => {
     expect((await post('/api/conv/c1/stop', { rendered: {} })).status).toBe(400);
     const a = (await (await post('/api/conv/c1/stop', { clientReqId: 's1' })).json()) as { seq: number };
+    expect((handle.lastInput as { rendered?: unknown }).rendered).toBeUndefined();
     const b = (await (await post('/api/conv/c1/stop', { clientReqId: 's1', rendered: { m: 3 } })).json()) as { seq: number };
     expect(b.seq).toBe(a.seq);
   });

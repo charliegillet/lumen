@@ -26,8 +26,9 @@ function clientId(v: unknown, name: string): Parsed<string> {
   return { ok: true, value: v };
 }
 
-function rendered(v: unknown): Parsed<Record<string, number>> {
-  if (v === undefined) return { ok: true, value: {} };
+/** Absent stays undefined (the server then counts committed text as seen); a map, even {}, is what the client showed. */
+function rendered(v: unknown): Parsed<Record<string, number> | undefined> {
+  if (v === undefined) return { ok: true, value: undefined };
   if (typeof v !== 'object' || v === null || Array.isArray(v)) {
     return { ok: false, error: 'rendered must be an object' };
   }

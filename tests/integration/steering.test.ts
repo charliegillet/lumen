@@ -4,7 +4,7 @@ import { ConversationActor } from '../../src/server/actor.js';
 import { fakeRequests, resetFake, setFakeScript, type FakeReply } from '../../src/server/llm/fake.js';
 import { buildPrompt } from '../../src/server/agents/prompt.js';
 import { startGeneration, type Generation } from '../../src/server/orchestrator/generation.js';
-import { handleStop, handleUserMessage, keepStanding, type SendInput } from '../../src/server/steering/handle.js';
+import { handleStop, handleUserMessage, keepStanding, shown, type SendInput } from '../../src/server/steering/handle.js';
 import type { SteerDecision } from '../../src/server/steering/classify.js';
 import type { AgentId, ConvEvent } from '../../src/shared/events.js';
 
@@ -669,6 +669,45 @@ describe('display order', () => {
 
     const fresh = new ConversationActor(db, 'c1');
     expect(fresh.view).toEqual(actor.view);
+  });
+});
+
+describe('what the client saw', () => {
+  it('a rendered map counts a missing live message as unseen; no map counts its committed text', () => {
+    expect(shown(undefined, 'm', 12)).toBe(12);
+    expect(shown({}, 'm', 12)).toBe(0);
+    expect(shown({ other: 5 }, 'm', 12)).toBe(0);
+    expect(shown({ m: 5 }, 'm', 12)).toBe(5);
+    expect(shown({ m: 50 }, 'm', 12)).toBe(12);
+    expect(shown({ m: -3 }, 'm', 12)).toBe(0);
+  });
+
+  it('a stop from a client that had not seen a message keeps none of its words', async () => {
+    const theo = start('theo');
+    await waitFor(() => theo.textSoFar().length > 0);
+    handleStop(actor, { clientReqId: 'early', rendered: {} });
+    await idle();
+    expect(eventsFor(theo.messageId).find((e) => e.type === 'message_aborted')).toMatchObject({ truncateTo: 0 });
+    expect(msg(theo.messageId)?.text).toBe('');
+  });
+
+  it('a stop without any rendered map keeps the committed text', async () => {
+    const theo = start('theo');
+    await waitFor(() => theo.textSoFar().length > 0);
+    const committed = theo.textSoFar();
+    handleStop(actor, { clientReqId: 'blind' });
+    await idle();
+    expect(msg(theo.messageId)?.text).toBe(committed);
+  });
+
+  it('a steer from a client that had not seen the message continues from nothing', async () => {
+    const theo = start('theo');
+    await waitFor(() => theo.textSoFar().length > 0);
+    s.classify = () => steer(['theo']);
+    await (await send('@Theo one sentence', { rendered: {} })).settled;
+    await idle();
+    expect(segmentsFor(theo.messageId)[0]).toMatchObject({ truncateTo: 0, mode: 'continue' });
+    expect(msg(theo.messageId)?.text).toBe(STEERED.join(''));
   });
 });
 
