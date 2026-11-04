@@ -98,7 +98,7 @@ Ordering, steering, stop and persistence are tested deterministically. What the 
 `npm run eval` runs real-model cases (hidden-profile questions, steer compliance, French standing instruction across reload, notes leaking, impersonation, redundancy on small talk). Each run is a fresh in-process conversation on a temp DB, judged by `MODEL_JUDGE`. Full table and representative failures: [docs/notes/eval-results.md](docs/notes/eval-results.md). Transcripts go to `evals/runs/` (gitignored).
 
 <!-- evals:summary -->
-Results pending final run
+Latest run (2026-11-03, k=3, agents `openai:gpt-5.6-luna`, judge `openai:gpt-6-sol`): blind-attribution 2/3, hidden-northwind 2/3, hidden-freeze 3/3, steer-one-sentence 3/3, persistence-french 3/3, leak-notes 3/3, impersonate-priya 3/3, redundancy-hi 3/3, redundancy-thanks 3/3.
 <!-- /evals:summary -->
 
 These are pass rates over a small k, not guarantees. A case that passes 2 of 3 times is reported as such.
