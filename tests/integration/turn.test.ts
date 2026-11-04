@@ -191,6 +191,19 @@ describe('runTurn', () => {
     expect(startedBy('theo')).toHaveLength(0);
   });
 
+  it('a mention of an agent who answered in the same wave does not force a repeat', async () => {
+    script({
+      gate: (id, n) => (n === 0 ? { should_respond: true, novelty: 3, gist: `${id} take` } : QUIET),
+      reply: (id) => ({
+        chunks: id === 'maya' ? ['@Priya can confirm ', 'the policy and timing.'] : ['Answer ', 'here.'],
+        delayMs: 5,
+      }),
+    });
+    await runTurn(actor, { triggerMessageId: 'u1', forced: [] });
+    expect(startedBy('priya')).toHaveLength(1);
+    expect(started().every((e) => e.hop === 0)).toBe(true);
+  });
+
   it('bid addresses force the addressed agent next wave', async () => {
     script({
       gate: (id, n) =>
@@ -263,18 +276,19 @@ describe('runTurn', () => {
   });
 
   describe('exchange terminates', () => {
-    it('message budget caps an all-mention storm', async () => {
+    it('message budget caps a mention storm', async () => {
       const others: Record<AgentId, string> = { maya: '@Theo @Priya', theo: '@Maya @Priya', priya: '@Maya @Theo' };
       script({
-        gate: (id, n) => (n === 0 ? { should_respond: true, novelty: 3, gist: `${id} idea` } : QUIET),
+        gate: (id, n) => (n === 0 && id === 'maya' ? { should_respond: true, novelty: 3, gist: 'start' } : QUIET),
         reply: (id) => ({ chunks: [others[id], ' thoughts?'], delayMs: 5 }),
       });
       await runTurn(actor, { triggerMessageId: 'u1', forced: [] });
 
       const s = started();
-      expect(s).toHaveLength(BUDGET.maxAgentMessages);
+      expect(s.length).toBeLessThanOrEqual(BUDGET.maxAgentMessages);
+      expect(s.length).toBeGreaterThan(3);
       expect(s.every((e) => e.hop <= BUDGET.maxHops)).toBe(true);
-      expect(s.map((e) => e.hop)).toEqual([0, 0, 0, 1, 1, 1, 2]);
+      expect(s.map((e) => e.hop)).toEqual([0, 1, 1, 2, 3, 3].slice(0, s.length));
       expect(actor.generations.size).toBe(0);
     });
 

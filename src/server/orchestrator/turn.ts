@@ -158,7 +158,11 @@ function cutToBudget<T extends { agentId: AgentId }>(speakers: T[], forced: Agen
   return speakers.filter((s) => kept.has(s));
 }
 
-/** Agents a wave's completed messages @mention or address, minus each speaker itself. */
+/**
+ * Agents a wave's completed messages @mention or address. Agents that spoke in
+ * the wave are skipped: the mention was written without seeing their concurrent
+ * answer, which already covers it.
+ */
 function nextForced(spoken: Spoken[]): AgentId[] {
   const out = new Set<AgentId>();
   for (const s of spoken) {
@@ -166,7 +170,8 @@ function nextForced(spoken: Spoken[]): AgentId[] {
     for (const id of parseTargets(s.text).targets) if (id !== s.agentId) out.add(id);
     for (const id of s.addresses) if (id !== 'user' && id !== s.agentId) out.add(id);
   }
-  return AGENT_IDS.filter((id) => out.has(id));
+  const inWave = new Set(spoken.map((s) => s.agentId));
+  return AGENT_IDS.filter((id) => out.has(id) && !inWave.has(id));
 }
 
 /** Wave 0 replies to the trigger; later waves to the message that @mentioned the agent. */
