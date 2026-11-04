@@ -3,6 +3,7 @@ import type { ModelMessage } from 'ai';
 import type { AgentId, Effort, EventBody } from '../../shared/events.js';
 import type { ConversationActor } from '../actor.js';
 import { buildPrompt, type PromptMode } from '../agents/prompt.js';
+import { modelSpec } from '../llm/registry.js';
 import { streamChat } from '../llm/stream.js';
 
 export const FLUSH_MS = 75;
@@ -28,6 +29,11 @@ interface Segment {
   /** Continue mode only: leading text held back until overlap is resolved. */
   head: string | null;
   readonly partial: string;
+  /** Set by launch; used for the time-to-first-visible-token log line. */
+  kind: SegmentKind;
+  startedAt: number;
+  /** Has a token_delta from this segment been appended? */
+  visible: boolean;
 }
 
 interface ReopenArgs {
@@ -205,6 +211,8 @@ export class Generation {
   }
 
   private launch(seg: Segment, kind: SegmentKind, cutoff: number, mode: PromptMode): void {
+    seg.kind = kind;
+    seg.startedAt = performance.now();
     let prompt: { system: string; messages: ModelMessage[] };
     try {
       prompt = buildPrompt(this.agentId, this.actor.eventsUpTo(cutoff), cutoff, mode);
@@ -300,6 +308,19 @@ export class Generation {
       offset: this.textSoFar().length,
       text,
     });
+    if (!seg.visible) {
+      seg.visible = true;
+      this.logTtft(seg);
+    }
+  }
+
+  /** One line per segment; silent under tests. */
+  private logTtft(seg: Segment): void {
+    if (process.env.NODE_ENV === 'test' || process.env.VITEST) return;
+    const ms = Math.round(performance.now() - seg.startedAt);
+    console.info(
+      `ttft agent=${this.agentId} model=${modelSpec('agent', this.agentId)} segment=${seg.segment} kind=${seg.kind} ms=${ms}`,
+    );
   }
 
   /** Errors from a stale segment (including our own aborts) are swallowed. */
@@ -351,6 +372,9 @@ function newSegment(segment: number, partial: string): Segment {
     timer: null,
     head: partial === '' ? null : '',
     partial,
+    kind: 'reply',
+    startedAt: performance.now(),
+    visible: false,
   };
 }
 

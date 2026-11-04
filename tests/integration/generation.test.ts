@@ -71,6 +71,26 @@ const eventsFor = (g: Generation): ConvEvent[] =>
 const deltas = (g: Generation) =>
   eventsFor(g).filter((e): e is Extract<ConvEvent, { type: 'token_delta' }> => e.type === 'token_delta');
 
+describe('ttft log', () => {
+  it('logs one line per visible segment outside tests, and stays quiet under vitest', async () => {
+    const info = vi.spyOn(console, 'info').mockImplementation(() => {});
+    setFakeScript(() => ({ chunks: ['Hel', 'lo'], delayMs: 2 }));
+    expect(await start().done).toBe('completed');
+    expect(info).not.toHaveBeenCalled();
+
+    const saved = { NODE_ENV: process.env.NODE_ENV, VITEST: process.env.VITEST };
+    delete process.env.NODE_ENV;
+    delete process.env.VITEST;
+    try {
+      expect(await start('theo').done).toBe('completed');
+    } finally {
+      for (const [k, v] of Object.entries(saved)) if (v !== undefined) process.env[k] = v;
+    }
+    expect(info).toHaveBeenCalledTimes(1);
+    expect(info.mock.calls[0]?.[0]).toMatch(/^ttft agent=theo model=fake:x segment=0 kind=reply ms=\d+$/);
+  });
+});
+
 describe('Generation', () => {
   it('streams and completes', async () => {
     setFakeScript(() => ({ chunks: ['Hel', 'lo'], delayMs: 5 }));
