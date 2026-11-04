@@ -146,6 +146,7 @@ const persistence: Case = {
   async run(ctx) {
     const c = ctx.chat();
     const setSeq = await c.say('From now on, everyone reply only in French please.');
+    c.reload(); // the instruction must survive a restart
     const firstQ = await c.say('@Maya when does full SSO ship?');
     await c.say('@Theo how is the Northwind renewal looking?');
     await c.say('@Priya how much runway do we have?');

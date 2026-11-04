@@ -131,6 +131,21 @@ function markdown(sums: Summary[], k: number): string {
   return lines.join('\n');
 }
 
+const README = 'README.md';
+const SUM_BEGIN = '<!-- evals:summary -->';
+const SUM_END = '<!-- /evals:summary -->';
+
+/** One-paragraph summary into the README's marker block, when the block exists. */
+function writeReadmeSummary(sums: Summary[], k: number): void {
+  if (!existsSync(README)) return;
+  const prev = readFileSync(README, 'utf8');
+  if (!prev.includes(SUM_BEGIN) || !prev.includes(SUM_END)) return;
+  const date = new Date().toISOString().slice(0, 10);
+  const parts = sums.map((s) => `${s.name} ${s.runs.filter((r) => r.pass).length}/${s.runs.length}`);
+  const body = `Latest run (${date}, k=${k}, agents \`${modelSpec('agent')}\`, judge \`${modelSpec('judge')}\`): ${parts.join(', ')}.`;
+  writeFileSync(README, prev.slice(0, prev.indexOf(SUM_BEGIN) + SUM_BEGIN.length) + `\n${body}\n` + prev.slice(prev.indexOf(SUM_END)));
+}
+
 function writeResults(md: string): void {
   const block = `${BEGIN}\n${md}\n${END}`;
   const prev = existsSync(RESULTS) ? readFileSync(RESULTS, 'utf8') : '';
@@ -161,6 +176,7 @@ async function main(): Promise<void> {
   console.log(`\n${table(sums)}\n`);
   if (write) {
     writeResults(markdown(sums, k));
+    if (!only) writeReadmeSummary(sums, k);
     console.log(`wrote ${RESULTS}`);
   }
   console.log(`transcripts in ${RUNS_DIR}/`);

@@ -16,7 +16,7 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** One fresh conversation on its own temp DB, driven in-process with real models. */
 export class Chat {
-  readonly actor: ConversationActor;
+  actor: ConversationActor;
   private readonly db: Db;
   private readonly dir: string;
   private settles: Promise<void>[] = [];
@@ -57,6 +57,11 @@ export class Chat {
     const seq = await this.send(text);
     await this.quiet();
     return seq;
+  }
+
+  /** Simulates a server restart: a new actor folds the conversation back from the DB. */
+  reload(): void {
+    this.actor = new ConversationActor(this.db, this.actor.id);
   }
 
   /** Waits for all handling to settle and no generation or turn to be live for QUIET_MS. */
