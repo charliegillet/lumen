@@ -376,6 +376,19 @@ describe('handleUserMessage: steering', () => {
     expect(resolved().at(-1)).toMatchObject({ targets: ['theo'] });
   });
 
+  it('the rewrite window counts from when the steer was sent, not when it was classified', async () => {
+    const theo = start('theo');
+    await theo.done;
+    await sleep(1000);
+    hooks.before = (meta) => (meta.kind === 'classify' ? sleep(1500) : undefined);
+    s.classify = () => steer(['theo']);
+    await (await send('@Theo shorter')).settled;
+    await idle();
+    expect(startedBy('theo')).toHaveLength(1);
+    expect(segmentsFor(theo.messageId)).toHaveLength(1);
+    expect(msg(theo.messageId)?.text).toBe(STEERED.join(''));
+  });
+
   /** A completed Theo message whose completion is 5 s in the past. */
   function oldTheoMessage(): number {
     const past = Date.now() - 5000;

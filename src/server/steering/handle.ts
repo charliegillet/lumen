@@ -82,7 +82,7 @@ export async function handleUserMessage(
   const messageId = randomUUID();
   const ev = actor.append({ type: 'user_message', messageId, clientMsgId: i.clientMsgId, text: i.text });
   unresolved(actor).set(messageId, ev.seq);
-  const settled = handle(actor, messageId, ev.seq, i).catch((err: unknown) => {
+  const settled = handle(actor, messageId, ev.seq, ev.at, i).catch((err: unknown) => {
     console.warn(`conversation ${actor.id}: handling message ${messageId} failed`, err);
   });
   return { seq: ev.seq, settled };
@@ -124,7 +124,14 @@ export function handleStop(
 
 // ---------------------------------------------------------------------------
 
-async function handle(actor: ConversationActor, userMessageId: string, userSeq: number, i: SendInput): Promise<void> {
+/** `sentAt` is the user_message's own time: the rewrite window is measured from it, not from when classification ends. */
+async function handle(
+  actor: ConversationActor,
+  userMessageId: string,
+  userSeq: number,
+  sentAt: number,
+  i: SendInput,
+): Promise<void> {
   const liveAtSend = [...actor.generations.values()];
   const regex = parseTargets(i.text);
   const targets: AgentId[] = [];
@@ -182,13 +189,13 @@ async function handle(actor: ConversationActor, userMessageId: string, userSeq: 
       let want = named.length > 0 ? named : uniq(liveAtSend.map((g) => g.agentId));
       if (want.length === 0) {
         // Nobody named and nobody was writing: aim at whatever just finished.
-        want = AGENT_IDS.filter((id) => justFinished(latestBy(actor, id), i.typingStartedAt, Date.now()));
+        want = AGENT_IDS.filter((id) => justFinished(latestBy(actor, id), i.typingStartedAt, sentAt));
       }
       if (want.length > 0) {
         const forced: AgentId[] = [];
         for (const id of want) {
           if (stoppedSince(actor, id, userSeq)) continue; // stopped after this steer was sent
-          const g = steerAgent(actor, id, d.apply, i);
+          const g = steerAgent(actor, id, d.apply, i, sentAt);
           if (g) {
             targets.push(id);
             waits.push(judgeWhenDone(actor, g));
@@ -275,12 +282,13 @@ function steerAgent(
   agentId: AgentId,
   apply: 'continue' | 'replace',
   i: SendInput,
+  sentAt: number,
 ): Generation | null {
   const live = liveBy(actor, agentId);
   if (live && restartLive(actor, live, apply, i)) return live;
 
   const m = latestBy(actor, agentId);
-  if (!m || !justFinished(m, i.typingStartedAt, Date.now()) || actor.generations.has(m.id)) return null;
+  if (!m || !justFinished(m, i.typingStartedAt, sentAt) || actor.generations.has(m.id)) return null;
   const g = reopenGeneration(actor, m.id, [i.text]);
   pending.set(g, { segment: g.segment, mode: 'replace', keep: 0, steers: [i.text], startSeq: actor.lastSeq });
   return g;
