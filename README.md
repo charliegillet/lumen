@@ -8,12 +8,13 @@ Maya, Theo and Priya answer side by side, can be redirected by name while they a
 [![Agents: 3 personas](https://img.shields.io/badge/Agents-3%20personas-5B3FD6?style=for-the-badge)](#the-cast)
 [![Steering: mid-sentence](https://img.shields.io/badge/Steering-mid--sentence-3178C6?style=for-the-badge)](#how-it-works)
 [![Ordering: defended](https://img.shields.io/badge/Ordering-defended-003B57?style=for-the-badge)](#quality)
+[![Live demo](https://img.shields.io/badge/Live%20demo-lumen--group--chat.fly.dev-7B3BE2?style=for-the-badge&logo=flydotio&logoColor=white)](https://lumen-group-chat.fly.dev)
 
-[![Tests](https://img.shields.io/badge/tests-268%20passing-2EA44F?style=flat-square)](#quality)
+[![Tests](https://img.shields.io/badge/tests-297%20passing-2EA44F?style=flat-square)](#quality)
 [![E2E](https://img.shields.io/badge/e2e-7%20passing-2EA44F?style=flat-square)](#quality)
 [![Property runs](https://img.shields.io/badge/property%20runs-100%2Frun%20%C2%B7%2013k%20explored-2EA44F?style=flat-square)](#quality)
 [![Typecheck](https://img.shields.io/badge/tsc%20strict-clean-2EA44F?style=flat-square)](#quality)
-[![Evals](https://img.shields.io/badge/real--model%20evals-k%3D3-lightgrey?style=flat-square)](#evals)
+[![Evals](https://img.shields.io/badge/real--model%20evals-25%2F27%20passing-2EA44F?style=flat-square)](#evals)
 <br/>
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178C6?style=flat-square&logo=typescript&logoColor=white)](tsconfig.json)
 [![Node.js](https://img.shields.io/badge/Node.js-%E2%89%A522-5FA04E?style=flat-square&logo=nodedotjs&logoColor=white)](package.json)
@@ -141,7 +142,7 @@ MODEL_JUDGE=openai:gpt-6-sol
 
 | Check | Result |
 |---|---|
-| `npm test`: unit (143), integration (124) and property (1 suite), all against a scripted fake LLM so races are reproducible | **268 passed** in 16 files, ~12 s |
+| `npm test`: unit (153), integration (143) and property (1 suite), all against a scripted fake LLM so races are reproducible | **297 passed** in 16 files, ~12 s |
 | `npm run test:e2e`: Playwright against the real built server in fake mode, Chromium (stream, steer, stop, reload mid-stream and after, standing instruction across reload, no internals in the UI) | **7 of 7 passed**, ~20 s |
 | Property tests: fast-check over random interleavings of sends, steers, stops, reloads, token arrival and 75 ms flush timers, with fake timers | **100 runs** per `npm test`; **13,000 runs** passed with `PROPERTY_RUNS=13000` (~160 s) |
 | `npm run typecheck` (strict) | clean |
@@ -190,9 +191,9 @@ Full table and representative failures: [docs/notes/eval-results.md](docs/notes/
 | ✅ **Group chat** | Three personas streaming concurrently with private notes, bid gate, dedup, waves and budgets |
 | ✅ **Steering** | `@Name` steers, stop, continue or replace, standing instructions, late-steer reopen; instant client-side freeze |
 | ✅ **Ordering and persistence** | Single-writer event log in SQLite WAL; reload and reconnect replay by `seq`; crash recovery |
-| ✅ **Tests** | 268 Vitest tests, 7 Playwright specs, property tests (13,000 runs explored), strict typecheck |
+| ✅ **Tests** | 297 Vitest tests, 7 Playwright specs, property tests (13,000 runs explored), strict typecheck |
 | ✅ **Real-model evals** | Harness and cases built and run against OpenAI; results in [docs/notes/eval-results.md](docs/notes/eval-results.md) |
-| ⏳ **Deploy** | `fly.toml` and `Dockerfile` ready. Live demo: (link added after deploy) |
+| ✅ **Deploy** | Live on Fly.io: [lumen-group-chat.fly.dev](https://lumen-group-chat.fly.dev) (one machine, SQLite on a volume, rate-limited) |
 
 ## Deploy
 
