@@ -117,8 +117,11 @@ function renderMessages(p: Persona, view: ConversationView, mode: PromptMode): M
   const turns: Turn[] = [];
   for (const m of history) {
     const own = m.author.kind === 'agent' && m.author.agentId === p.id;
+    if (own && m.text.trim() === '') continue; // providers reject empty assistant content
     append(turns, own ? { role: 'assistant', content: m.text } : { role: 'user', content: wrap(m) });
   }
+  // Some providers require the first turn to be the user's (the history cut can start on our own message).
+  if (turns[0]?.role === 'assistant') turns.unshift({ role: 'user', content: OMITTED });
 
   // Standing instructions are repeated here, where steers sit, so they stay salient.
   const standing = standingLines(p, view);
@@ -145,6 +148,8 @@ function wrap(m: MessageView): string {
 function neutralize(text: string): string {
   return text.replace(/<(\/?)(msg)/gi, '&lt;$1$2');
 }
+
+export const OMITTED = '<msg from="You" kind="human">(earlier messages omitted)</msg>';
 
 const identityReminder = (p: Persona) => `You are ${p.name}. Stay in your voice.`;
 

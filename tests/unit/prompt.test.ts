@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { ModelMessage } from 'ai';
 import type { AgentId, ConvEvent, EventBody } from '../../src/shared/events.js';
 import { AGENT_IDS, PERSONAS } from '../../src/server/agents/personas.js';
-import { buildPrompt, publicRoster, type PromptMode } from '../../src/server/agents/prompt.js';
+import { buildPrompt, OMITTED, publicRoster, type PromptMode } from '../../src/server/agents/prompt.js';
 import { EFFORT } from '../../src/server/llm/stream.js';
 
 // ---------------------------------------------------------------------------
@@ -270,6 +270,29 @@ describe('buildPrompt', () => {
     }
     const none = textOf(last(buildPrompt('maya', fixture().events, fixture().seq, MODES[1]!).messages));
     expect(none).not.toContain('Standing instructions you must follow');
+  });
+
+  it('starts with a user turn when the history would start with the agent itself', () => {
+    const log = new Log();
+    log.agent('maya', 'MAYA-FIRST');
+    log.user('ok');
+    const { messages } = buildPrompt('maya', log.events, log.seq, MODES[1]!);
+    expect(messages[0]?.role).toBe('user');
+    expect(textOf(messages[0]!)).toBe(OMITTED);
+    expect(messages[1]?.role).toBe('assistant');
+    expect(textOf(messages[1]!)).toBe('MAYA-FIRST');
+    // Not added when the history already starts with someone else.
+    expect(textOf(buildPrompt('maya', fixture().events, fixture().seq, MODES[1]!).messages[0]!)).not.toContain(OMITTED);
+  });
+
+  it('never sends an empty assistant turn for its own blank message', () => {
+    const log = fixture();
+    log.user('and?');
+    log.agent('maya', '   ');
+    log.user('next?');
+    const { messages } = buildPrompt('maya', log.events, log.seq, MODES[1]!);
+    for (const m of messages) expect(textOf(m).trim(), m.role).not.toBe('');
+    expect(messages.filter((m) => m.role === 'assistant').map(textOf)).not.toContain('   ');
   });
 
   it('a re-set instruction moves to the end (latest wins)', () => {
