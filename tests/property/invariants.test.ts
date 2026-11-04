@@ -8,7 +8,7 @@ import { FLUSH_MS } from '../../src/server/orchestrator/generation.js';
 import { BUDGET } from '../../src/server/orchestrator/turn.js';
 import { handleStop, handleUserMessage } from '../../src/server/steering/handle.js';
 import type { SteerDecision } from '../../src/server/steering/classify.js';
-import { applyEvent, fold } from '../../src/shared/reducer.js';
+import { applyEvent, fold, type ConversationView } from '../../src/shared/reducer.js';
 import type { AgentId, ConvEvent } from '../../src/shared/events.js';
 
 /*
@@ -42,7 +42,7 @@ const CONV = 'p1';
 const RUNS = Number(process.env.PROPERTY_RUNS ?? 100);
 
 /** Coverage evidence, accumulated over every run from the event logs. */
-const cover = { stopWhileOpen: 0, steerMidStream: 0, reopen: 0 };
+const cover = { stopWhileOpen: 0, steerMidStream: 0, reopen: 0, moved: 0 };
 
 interface Params {
   gate: Record<AgentId, boolean>;
@@ -235,12 +235,38 @@ function checkLive(r: Real): void {
   expect(streaming.sort(), 'streaming == live generations').toEqual([...r.actor.generations.keys()].sort());
 }
 
+/**
+ * Display order: messages sorted by anchorSeq, recomputed from the log as the
+ * start seq or the seq of the latest segment marked moved. A moved segment is
+ * only ever caused by a user message still being decided (between it and its
+ * steer_resolved), never by the compliance redo.
+ */
+function checkOrder(evs: ConvEvent[], view: ConversationView): void {
+  const anchor = new Map<string, number>();
+  const deciding = new Set<string>();
+  for (const e of evs) {
+    if (e.type === 'user_message') {
+      anchor.set(e.messageId, e.seq);
+      deciding.add(e.messageId);
+    } else if (e.type === 'steer_resolved') deciding.delete(e.userMessageId);
+    else if (e.type === 'message_started') anchor.set(e.messageId, e.seq);
+    else if (e.type === 'message_segment_started' && e.moved) {
+      expect(deciding.size, `seq ${e.seq}: moved segment with no user message being decided`).toBeGreaterThan(0);
+      anchor.set(e.messageId, e.seq);
+    }
+  }
+  const expected = [...anchor].sort((a, b) => a[1] - b[1]).map(([id]) => id);
+  expect(view.messages.map((m) => m.id), 'display order == anchorSeq order').toEqual(expected);
+  expect(view.messages.map((m) => m.anchorSeq), 'anchorSeq from the log').toEqual(expected.map((id) => anchor.get(id)));
+}
+
 /** Mid-run reload: a client snapshot + catch-up equals the view; a crash-restart on a copy recovers cleanly. */
 function reload(r: Real, frac: number): void {
   const evs = r.actor.eventsAfter(0);
   checkSeqs(r, evs);
   checkLive(r);
   expect(fold(evs), 'fold(log) == actor.view').toEqual(r.actor.view);
+  checkOrder(evs, r.actor.view);
 
   const k = Math.floor(frac * r.actor.lastSeq);
   const caughtUp = r.actor.eventsAfter(k).reduce(applyEvent, fold(r.actor.eventsUpTo(k)));
@@ -279,6 +305,8 @@ function checkFinal(r: Real): void {
   const fresh = new ConversationActor(r.db, CONV);
   expect(fresh.lastSeq, 'fresh actor appended recovery events while idle').toBe(r.actor.lastSeq);
   expect(fresh.view, 'fresh actor view').toEqual(r.actor.view);
+  // 10: display order is anchorSeq order.
+  checkOrder(evs, r.actor.view);
 
   // 3, 4, 5 in one pass over the log.
   interface Life {
@@ -304,6 +332,7 @@ function checkFinal(r: Real): void {
         expect(e.segment, `${at}: segment not previous+1`).toBe(l!.segment + 1);
         if (l!.open) cover.steerMidStream++;
         else cover.reopen++;
+        if (e.moved) cover.moved++;
         l!.segment = e.segment;
         l!.open = true;
         l!.text = Math.min(l!.text, e.truncateTo);
@@ -443,10 +472,11 @@ describe('ordering invariants (property)', () => {
     );
     if (process.env.PROPERTY_VERBOSE) {
       console.info(
-        `coverage: stop_all-while-open=${cover.stopWhileOpen} steer-mid-stream=${cover.steerMidStream} reopen=${cover.reopen}`,
+        `coverage: stop_all-while-open=${cover.stopWhileOpen} steer-mid-stream=${cover.steerMidStream} reopen=${cover.reopen} moved=${cover.moved}`,
       );
     }
     expect(cover.stopWhileOpen, 'stop_all landed while a message was open').toBeGreaterThan(0);
     expect(cover.steerMidStream, 'segment restarted while open').toBeGreaterThan(0);
+    expect(cover.moved, 'a steer moved a message').toBeGreaterThan(0);
   }, Math.max(30_000, RUNS * 200));
 });
