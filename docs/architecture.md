@@ -127,7 +127,7 @@ Checked by `tests/property/invariants.test.ts` (fast-check, random interleavings
 - Single Fly machine with a 1 GB volume at `/data` (`DB_PATH=/data/chat.db`). Actors are in memory, so auto-stop is off and `min_machines_running = 1`; scaling beyond one machine would need sticky routing per conversation.
 - SSE needs no special Fly config: the proxy passes streaming responses, the server sets `Cache-Control: no-cache` and `X-Accel-Buffering: no`, and sends `: ping` every 20 s to keep idle connections open.
 - Health check: `GET /api/health` returns `{"ok":true}` (`/` redirects, so it is not usable).
-- Models are env strings (`MODEL_AGENT`, `MODEL_GATE`, `MODEL_CLASSIFIER`, optional `MODEL_JUDGE`, `MODEL_AGENT_<NAME>`) of the form `provider:model` resolved by the AI SDK registry; `fake:x` selects the scripted fake used by tests and e2e.
+- Models are env strings (`MODEL_AGENT`, `MODEL_GATE`, `MODEL_CLASSIFIER`, `MODEL_AGENT_<NAME>`) of the form `provider:model` resolved by the AI SDK registry; `fake:x` selects the scripted fake used by tests and e2e. The in-app compliance judge runs on `MODEL_CLASSIFIER`; `MODEL_JUDGE` only sets the grader for `npm run eval`, so the deployment does not set it.
 
 ## Where things live
 

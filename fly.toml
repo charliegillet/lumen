@@ -7,7 +7,6 @@ primary_region = "sjc"
   MODEL_AGENT = "openai:gpt-5.6-luna"
   MODEL_GATE = "openai:gpt-5.6-luna"
   MODEL_CLASSIFIER = "openai:gpt-5.6-luna"
-  MODEL_JUDGE = "openai:gpt-6-sol"
 
 [mounts]
   source = "chat_data"
