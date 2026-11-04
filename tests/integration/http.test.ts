@@ -241,6 +241,59 @@ describe('commands', () => {
   });
 });
 
+describe('rate limits', () => {
+  afterEach(() => {
+    delete process.env.RATE_LIMIT_PER_MIN;
+    delete process.env.MAX_MESSAGES_PER_CONV;
+    vi.restoreAllMocks();
+  });
+  const from = (ip: string, path: string, body: unknown, header = 'fly-client-ip') =>
+    app.request(path, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', [header]: ip },
+      body: JSON.stringify(body),
+    });
+
+  it('allows 20 new messages per IP per minute, then 429 until the window passes', async () => {
+    let now = 1_000_000;
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
+    for (let i = 0; i < 20; i++) {
+      const res = await from('1.1.1.1', `/api/conv/r${i % 3}/messages`, msgBody({ clientMsgId: `a${i}` }));
+      expect(res.status).toBe(200);
+    }
+    const over = await from('1.1.1.1', '/api/conv/r0/messages', msgBody({ clientMsgId: 'a20' }));
+    expect(over.status).toBe(429);
+    expect(await over.json()).toHaveProperty('error');
+    expect(getActor(db, 'r0').view.messages.some((m) => m.clientMsgId === 'a20')).toBe(false);
+    // A retry of a delivered message is still answered; another IP is unaffected.
+    expect((await from('1.1.1.1', '/api/conv/r0/messages', msgBody({ clientMsgId: 'a0' }))).status).toBe(200);
+    expect((await from('2.2.2.2', '/api/conv/r0/messages', msgBody({ clientMsgId: 'b0' }))).status).toBe(200);
+    now += 60_001;
+    expect((await from('1.1.1.1', '/api/conv/r0/messages', msgBody({ clientMsgId: 'a21' }))).status).toBe(200);
+  });
+
+  it('keys on the first x-forwarded-for hop and reads RATE_LIMIT_PER_MIN', async () => {
+    process.env.RATE_LIMIT_PER_MIN = '2';
+    const send = (ip: string, id: string) =>
+      from(ip, '/api/conv/x1/messages', msgBody({ clientMsgId: id }), 'x-forwarded-for');
+    expect((await send('9.9.9.9, 10.0.0.1', 'x1')).status).toBe(200);
+    expect((await send('9.9.9.9, 10.0.0.2', 'x2')).status).toBe(200);
+    expect((await send('9.9.9.9', 'x3')).status).toBe(429);
+    expect((await send('8.8.8.8, 9.9.9.9', 'x4')).status).toBe(200);
+  });
+
+  it('caps user messages per conversation (MAX_MESSAGES_PER_CONV)', async () => {
+    process.env.MAX_MESSAGES_PER_CONV = '3';
+    for (let i = 0; i < 3; i++) {
+      expect((await from(`3.3.3.${i}`, '/api/conv/cap/messages', msgBody({ clientMsgId: `m${i}` }))).status).toBe(200);
+    }
+    const res = await from('4.4.4.4', '/api/conv/cap/messages', msgBody({ clientMsgId: 'm3' }));
+    expect(res.status).toBe(429);
+    expect(await res.json()).toHaveProperty('error');
+    expect((await from('4.4.4.4', '/api/conv/other/messages', msgBody({ clientMsgId: 'm3' }))).status).toBe(200);
+  });
+});
+
 describe('routing', () => {
   it('web root is <cwd>/dist/web, never src/web', () => {
     expect(resolveWebRoot('/proj')).toBe('/proj/dist/web');
