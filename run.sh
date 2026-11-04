@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Installs dependencies, builds, and starts the group chat.
-# Usage: ./run.sh          real models (needs OPENAI_API_KEY in .env)
+# Usage: ./run.sh          real models (OpenAI ones need OPENAI_API_KEY, from the environment or .env)
 #        ./run.sh --fake   scripted fake models, no API key needed
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -18,12 +18,28 @@ fi
 
 [[ -f .env ]] || cp .env.example .env
 
+# A setting from the environment, else from .env (quotes stripped), else $2.
+setting() {
+  local v="${!1:-}"
+  if [[ -z "$v" ]]; then
+    v=$(grep -E "^$1=" .env 2>/dev/null | tail -n 1 | cut -d= -f2- || true)
+    v="${v%\"}"; v="${v#\"}"; v="${v%\'}"; v="${v#\'}"
+  fi
+  echo "${v:-$2}"
+}
+
 if [[ "${1:-}" == "--fake" ]]; then
   export MODEL_AGENT=fake:x MODEL_GATE=fake:x MODEL_CLASSIFIER=fake:x FAKE_SCRIPT=e2e
   echo "Using scripted fake models."
-elif ! grep -Eq '^OPENAI_API_KEY=.+' .env; then
-  echo "OPENAI_API_KEY is not set in .env. Add it, or run ./run.sh --fake." >&2
-  exit 1
+else
+  needs_openai=0
+  for k in MODEL_AGENT MODEL_GATE MODEL_CLASSIFIER; do
+    [[ "$(setting "$k" openai:)" == openai:* ]] && needs_openai=1
+  done
+  if (( needs_openai )) && [[ -z "$(setting OPENAI_API_KEY '')" ]]; then
+    echo "OPENAI_API_KEY is not set (environment or .env). Add it, or run ./run.sh --fake." >&2
+    exit 1
+  fi
 fi
 
 echo "Building..."
