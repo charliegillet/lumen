@@ -21,8 +21,20 @@ export interface PendingSend {
   failed: boolean;
 }
 
+/** Typewriter progress of one message: `shown` chars are on screen, `pos` is the (fractional) reveal credit. */
+export interface Reveal {
+  shown: number;
+  pos: number;
+  /** Set once the message has ended: the steady rate that drains the rest within REVEAL_FINISH_MS. */
+  finishCps?: number;
+}
+
 export interface ClientState {
   view: ConversationView;
+  /** Animate live deltas (false: show them at once, e.g. prefers-reduced-motion). */
+  animate: boolean;
+  /** messageId -> typewriter progress, only for messages whose live deltas are still being revealed. */
+  reveal: Map<string, Reveal>;
   /** messageId -> frozen char count. Text past it is buffered, not shown. */
   frozen: Map<string, number>;
   /** messageId -> words kept on screen while a rewrite has produced nothing yet. */
@@ -36,7 +48,8 @@ export interface ClientState {
   lastStopSeq: number;
 }
 
-export type ShownMessage = MessageView & { key: string; pending: boolean; failed: boolean };
+/** `typing`: the agent has started its message but no words are on screen yet. */
+export type ShownMessage = MessageView & { key: string; pending: boolean; failed: boolean; typing: boolean };
 
 /**
  * A freeze is released after this long even if the server never says so.
@@ -49,9 +62,11 @@ export const STOP_GRACE_MS = 3000;
 /** An own send counts as pending work at most this long (classifier cap plus a gate). */
 export const AWAIT_CAP_MS = 15_000;
 
-export function initialState(view: ConversationView = emptyView): ClientState {
+export function initialState(view: ConversationView = emptyView, opts: { animate?: boolean } = {}): ClientState {
   return {
     view,
+    animate: opts.animate ?? false,
+    reveal: new Map(),
     frozen: new Map(),
     held: new Map(),
     pendingSends: [],
@@ -84,13 +99,129 @@ export function stopExpiresIn(s: ClientState, now: number): number | null {
   return left.length > 0 ? Math.min(...left) : null;
 }
 
+// ---------------------------------------------------------------------------
+// Typewriter reveal. Live deltas land in ~75 ms bursts; the display catches up
+// at a steady rate instead, never more than about REVEAL_MAX_LAG_MS behind.
+
+/** Reveal speed with little backlog, in chars per second. */
+export const REVEAL_BASE_CPS = 75;
+/** The rate grows with the backlog so the display lags at most about this much. */
+export const REVEAL_MAX_LAG_MS = 300;
+/** Once a message has ended, what is left is revealed within about this long. */
+export const REVEAL_FINISH_MS = 150;
+/** A word longer than this is revealed mid-word rather than waiting for its end. */
+const REVEAL_MAX_WORD = 12;
+
+/** Characters of the message's own text on screen (frozen and typewriter limits applied). */
+export function shownLength(s: ClientState, m: MessageView): number {
+  let n = m.text.length;
+  const r = s.reveal.get(m.id);
+  if (r !== undefined) n = Math.min(n, r.shown);
+  const f = s.frozen.get(m.id);
+  if (f !== undefined) n = Math.min(n, f);
+  return n;
+}
+
 export function displayedText(s: ClientState, m: MessageView): string {
-  if (m.text === '') {
+  const n = shownLength(s, m);
+  if (n === 0) {
     const held = s.held.get(m.id);
     if (held !== undefined) return held;
   }
-  const n = s.frozen.get(m.id);
-  return n === undefined ? m.text : m.text.slice(0, n);
+  return m.text.slice(0, n);
+}
+
+/** Never end a reveal between the two halves of a surrogate pair. */
+function safeCut(text: string, n: number): number {
+  if (n <= 0 || n >= text.length) return Math.max(0, Math.min(n, text.length));
+  const c = text.charCodeAt(n - 1);
+  return c >= 0xd800 && c <= 0xdbff ? n - 1 : n;
+}
+
+/**
+ * Where to stop when `limit` chars are allowed: the last word boundary after
+ * `from`, or mid-word (surrogate-safe) once a word runs longer than
+ * REVEAL_MAX_WORD. The end of the text is a boundary only once it is final.
+ */
+function revealCut(text: string, from: number, limit: number, final: boolean): number {
+  if (limit >= text.length && final) return text.length;
+  const cap = Math.min(limit, text.length);
+  for (let i = cap; i > from; i--) {
+    if (/\s/.test(text[i - 1]!)) return i;
+  }
+  return cap - from >= REVEAL_MAX_WORD ? Math.max(from, safeCut(text, cap)) : from;
+}
+
+/** Chars per second for this backlog. For an ended message, the rate that drains it within REVEAL_FINISH_MS. */
+export function revealRate(backlog: number, ended: boolean): number {
+  const rate = Math.max(REVEAL_BASE_CPS, (backlog * 1000) / REVEAL_MAX_LAG_MS);
+  return ended ? Math.max(rate, (backlog * 1000) / REVEAL_FINISH_MS) : rate;
+}
+
+/** Advances every typewriter by `dtMs`. Frozen messages do not move; finished reveals are dropped. */
+export function advanceReveal(s: ClientState, dtMs: number): ClientState {
+  if (s.reveal.size === 0) return s;
+  const byId = new Map(s.view.messages.map((m) => [m.id, m]));
+  const reveal = new Map<string, Reveal>();
+  let changed = false;
+  for (const [id, r] of s.reveal) {
+    const m = byId.get(id);
+    if (!m) {
+      changed = true;
+      continue;
+    }
+    const ended = m.status !== 'streaming';
+    const total = m.text.length;
+    if (r.shown >= total && ended) {
+      changed = true; // caught up with a final text: nothing left to animate
+      continue;
+    }
+    if (s.frozen.has(id) || r.shown >= total) {
+      reveal.set(id, r);
+      continue;
+    }
+    // Once ended, the rate is fixed from the backlog left at that moment, so the
+    // rest drains in about REVEAL_FINISH_MS (a rate tied to a shrinking backlog would trail off).
+    const finishCps = ended ? (r.finishCps ?? revealRate(total - r.shown, true)) : undefined;
+    const rate = finishCps ?? revealRate(total - r.shown, false);
+    const pos = Math.min(total, Math.max(r.pos, r.shown) + (rate * dtMs) / 1000);
+    const shown = revealCut(m.text, r.shown, Math.floor(pos), ended);
+    if (shown >= total && ended) {
+      changed = true;
+      continue;
+    }
+    reveal.set(id, finishCps === undefined ? { shown, pos } : { shown, pos, finishCps });
+    changed = true;
+  }
+  if (!changed) return s;
+  // Words reached the screen: held text from before a rewrite is no longer needed.
+  let held = s.held;
+  for (const [id, r] of reveal) if (r.shown > 0 && held.has(id)) held = without(held, id);
+  for (const id of s.held.keys()) if (!reveal.has(id) && s.reveal.has(id)) held = without(held, id);
+  return { ...s, reveal, held };
+}
+
+/** Is any typewriter still behind (and free to move)? The hook keeps animating while true. */
+export function revealPending(s: ClientState): boolean {
+  for (const [id, r] of s.reveal) {
+    if (s.frozen.has(id)) continue;
+    const m = s.view.messages.find((x) => x.id === id);
+    if (!m || r.shown < m.text.length || m.status !== 'streaming') return true;
+  }
+  return false;
+}
+
+/** Clamp a typewriter after its message's text was cut back. */
+function clampReveal(reveal: Map<string, Reveal>, id: string, len: number): Map<string, Reveal> {
+  const r = reveal.get(id);
+  if (r === undefined || (r.shown <= len && r.pos <= len)) return reveal;
+  return new Map(reveal).set(id, { shown: Math.min(r.shown, len), pos: Math.min(r.pos, len) }); // a new segment re-derives its rate
+}
+
+/** Turns the typewriter on or off; off shows everything received at once. */
+export function setAnimate(s: ClientState, animate: boolean): ClientState {
+  if (s.animate === animate) return s;
+  return { ...s, animate, reveal: animate ? s.reveal : new Map() };
 }
 
 const streamingAgents = (s: ClientState) =>
@@ -102,7 +233,7 @@ const streamingAgents = (s: ClientState) =>
 function freezeWhere(s: ClientState, pick: (agentId: AgentId) => boolean): ClientState {
   const frozen = new Map(s.frozen);
   for (const m of streamingAgents(s)) {
-    if (pick(m.author.agentId) && !frozen.has(m.id)) frozen.set(m.id, displayedText(s, m).length);
+    if (pick(m.author.agentId) && !frozen.has(m.id)) frozen.set(m.id, shownLength(s, m));
   }
   return { ...s, frozen };
 }
@@ -169,17 +300,41 @@ export function onEvent(s: ClientState, e: ConvEvent): ClientState {
           held.set(e.messageId, words);
         }
       }
-      return { ...next, held, frozen: without(s.frozen, e.messageId) };
+      const len = view.messages.find((m) => m.id === e.messageId)?.text.length ?? 0;
+      return { ...next, held, frozen: without(s.frozen, e.messageId), reveal: clampReveal(s.reveal, e.messageId, len) };
     }
     case 'token_delta': {
+      const before = s.view.messages.find((x) => x.id === e.messageId);
       const m = view.messages.find((x) => x.id === e.messageId);
-      if (m && m.text !== '' && s.held.has(e.messageId)) return { ...next, held: without(s.held, e.messageId) };
+      if (!before || !m || m.text === before.text) return next;
+      if (s.animate && m.status === 'streaming') {
+        // Live words: start (or keep) the typewriter from what was on screen.
+        if (s.reveal.has(e.messageId)) return next;
+        const from = before.text.length;
+        return { ...next, reveal: new Map(s.reveal).set(e.messageId, { shown: from, pos: from }) };
+      }
+      if (s.held.has(e.messageId) && shownLength(next, m) > 0) return { ...next, held: without(s.held, e.messageId) };
       return next;
     }
-    case 'message_completed':
-      return { ...next, frozen: without(s.frozen, e.messageId), held: without(s.held, e.messageId), lastWorkAt: Date.now() };
+    case 'message_completed': {
+      // The typewriter (if any) finishes on its own, quickly; held words stay until it shows something.
+      const r = s.reveal.get(e.messageId);
+      const m = view.messages.find((x) => x.id === e.messageId);
+      const keepHeld = r !== undefined && r.shown === 0 && m !== undefined && m.text !== '';
+      return {
+        ...next,
+        frozen: without(s.frozen, e.messageId),
+        held: keepHeld ? s.held : without(s.held, e.messageId),
+        lastWorkAt: Date.now(),
+      };
+    }
     case 'message_aborted':
-      return { ...next, frozen: without(s.frozen, e.messageId), held: without(s.held, e.messageId) };
+      return {
+        ...next,
+        frozen: without(s.frozen, e.messageId),
+        held: without(s.held, e.messageId),
+        reveal: clampReveal(s.reveal, e.messageId, e.truncateTo),
+      };
     case 'stop_all':
       // The aborts that follow carry the final text; hold everything until they land.
       // Sends before it are stopped too, so they no longer count as pending work.
@@ -193,7 +348,7 @@ export function onEvent(s: ClientState, e: ConvEvent): ClientState {
 export function renderedCounts(s: ClientState): Record<string, number> {
   const out: Record<string, number> = {};
   for (const m of s.view.messages) {
-    if (m.status === 'streaming') out[m.id] = displayedText(s, m).length;
+    if (m.status === 'streaming') out[m.id] = shownLength(s, m);
   }
   return out;
 }
@@ -242,6 +397,7 @@ export function withSnapshot(s: ClientState, view: ConversationView): ClientStat
     view,
     frozen,
     held,
+    reveal: new Map(), // snapshot text appears at once
     pendingSends: s.pendingSends.filter(
       (p) => !sent.has(p.clientMsgId) && (p.seq === null || p.seq > view.lastSeq),
     ),
@@ -252,9 +408,12 @@ export function withSnapshot(s: ClientState, view: ConversationView): ClientStat
 export function shownMessages(s: ClientState): ShownMessage[] {
   const out: ShownMessage[] = [];
   for (const m of visibleMessages(s.view)) {
-    if (m.author.kind === 'agent' && displayedText(s, m) === '') continue; // no words yet
+    // An agent that started writing but shows no words yet gets typing dots;
+    // one that ended with nothing to show has no bubble at all.
+    const typing = m.author.kind === 'agent' && displayedText(s, m) === '';
+    if (typing && m.status !== 'streaming' && m.text === '') continue;
     // Keyed by clientMsgId so a confirmed send does not remount its bubble.
-    out.push({ ...m, key: m.clientMsgId ?? m.id, pending: false, failed: false });
+    out.push({ ...m, key: m.clientMsgId ?? m.id, pending: false, failed: false, typing });
   }
   for (const p of s.pendingSends) {
     out.push({
@@ -270,6 +429,7 @@ export function shownMessages(s: ClientState): ShownMessage[] {
       hop: 0,
       pending: true,
       failed: p.failed,
+      typing: false,
     });
   }
   return out;
@@ -277,6 +437,10 @@ export function shownMessages(s: ClientState): ShownMessage[] {
 
 // ---------------------------------------------------------------------------
 // React hook
+
+function prefersReducedMotion(): boolean {
+  return typeof window !== 'undefined' && !!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+}
 
 function uuid(): string {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return crypto.randomUUID();
@@ -310,12 +474,31 @@ export interface Conversation {
 
 export function useConversation(id: string): Conversation {
   const base = `/api/conv/${encodeURIComponent(id)}`;
-  // `latest` gets every event immediately; React sees it once per animation frame.
-  const latest = useRef<ClientState>(initialState());
+  // `latest` gets every event immediately; React sees it once per animation
+  // frame, and each frame also moves the typewriter along.
+  const latest = useRef<ClientState>(initialState(emptyView, { animate: !prefersReducedMotion() }));
   const [state, setState] = useState<ClientState>(latest.current);
   const [loaded, setLoaded] = useState(false);
   const frame = useRef<number | null>(null);
+  const lastFrameAt = useRef<number | null>(null);
   const sendInfo = useRef(new Map<string, { text: string; typingStartedAt: number | null; rendered: Record<string, number> }>());
+
+  const schedule = useCallback(() => {
+    if (frame.current !== null) return;
+    const tick = (t: number) => {
+      frame.current = null;
+      // A long gap (hidden tab, first frame after idle) counts as one short frame;
+      // the backlog-scaled rate catches up from there.
+      const dt = lastFrameAt.current === null ? 16 : Math.min(Math.max(0, t - lastFrameAt.current), 100);
+      latest.current = advanceReveal(latest.current, dt);
+      setState(latest.current);
+      if (revealPending(latest.current)) {
+        lastFrameAt.current = t;
+        frame.current = requestAnimationFrame(tick);
+      } else lastFrameAt.current = null;
+    };
+    frame.current = requestAnimationFrame(tick);
+  }, []);
 
   const flushNow = useCallback(() => {
     if (frame.current !== null) {
@@ -323,14 +506,19 @@ export function useConversation(id: string): Conversation {
       frame.current = null;
     }
     setState(latest.current);
-  }, []);
+    if (revealPending(latest.current)) schedule();
+  }, [schedule]);
 
-  const schedule = useCallback(() => {
-    if (frame.current !== null) return;
-    frame.current = requestAnimationFrame(() => {
-      frame.current = null;
+  // prefers-reduced-motion: words appear as they arrive.
+  useEffect(() => {
+    if (typeof window === 'undefined' || !window.matchMedia) return;
+    const mq = window.matchMedia('(prefers-reduced-motion: reduce)');
+    const onChange = () => {
+      latest.current = setAnimate(latest.current, !mq.matches);
       setState(latest.current);
-    });
+    };
+    mq.addEventListener('change', onChange);
+    return () => mq.removeEventListener('change', onChange);
   }, []);
 
   // Every freeze, whoever caused it (a send, Stop, a stop_all from elsewhere,
@@ -344,10 +532,11 @@ export function useConversation(id: string): Conversation {
         timers.current.delete(id);
         latest.current = unfreeze(latest.current, [id]);
         setState(latest.current);
+        if (revealPending(latest.current)) schedule();
       }, SAFETY_UNFREEZE_MS);
       timers.current.set(id, t);
     }
-  }, []);
+  }, [schedule]);
   useEffect(() => {
     const map = timers.current;
     return () => {

@@ -4,6 +4,7 @@ import { emptyView, GapError, type MessageView } from '../../src/shared/reducer.
 import {
   ackPending,
   addPending,
+  advanceReveal,
   AWAIT_CAP_MS,
   canStop,
   displayedText,
@@ -13,7 +14,13 @@ import {
   initialState,
   onEvent,
   renderedCounts,
+  REVEAL_BASE_CPS,
+  REVEAL_FINISH_MS,
+  REVEAL_MAX_LAG_MS,
+  revealPending,
+  revealRate,
   SAFETY_UNFREEZE_MS,
+  setAnimate,
   shownMessages,
   STOP_GRACE_MS,
   stopExpiresIn,
@@ -78,6 +85,156 @@ function twoStreaming(): ClientState {
     delta(5, 'B', 'Theo says'),
   );
 }
+
+/** Like twoStreaming, with the typewriter on and everything so far revealed. */
+function animated(): ClientState {
+  return apply(initialState(undefined, { animate: true }), user(1, 'u1'), started(2, 'A', 'maya'), started(3, 'B', 'theo'));
+}
+const deltaAt = (seq: number, id: string, text: string, offset: number, segment = 0): ConvEvent =>
+  ev(seq, { type: 'token_delta', messageId: id, segment, offset, text });
+/** Advance in 16 ms frames. */
+function frames(s: ClientState, n: number): ClientState {
+  for (let i = 0; i < n; i++) s = advanceReveal(s, 16);
+  return s;
+}
+
+describe('typewriter reveal', () => {
+  it('live words appear gradually at the base rate, at word boundaries', () => {
+    let s = apply(animated(), deltaAt(4, 'A', 'ab cd ef gh ', 0));
+    expect(msg(s, 'A').text).toBe('ab cd ef gh ');
+    expect(shown(s, 'A')).toBe(''); // nothing yet: still typing dots
+    expect(shownMessages(s).find((m) => m.id === 'A')?.typing).toBe(true);
+    s = advanceReveal(s, 40); // 75 chars/s * 40 ms = 3 chars
+    expect(shown(s, 'A')).toBe('ab ');
+    s = advanceReveal(s, 40);
+    expect(shown(s, 'A')).toBe('ab cd ');
+    s = advanceReveal(s, 20); // 1.5 more chars: not enough for the next word
+    expect(shown(s, 'A')).toBe('ab cd ');
+    s = frames(s, 10);
+    expect(shown(s, 'A')).toBe('ab cd ef gh ');
+    expect(revealPending(s)).toBe(false); // caught up, waiting for more
+  });
+
+  it('the rate grows with the backlog and the display stays within about 400 ms of what arrived', () => {
+    expect(revealRate(3, false)).toBe(REVEAL_BASE_CPS);
+    expect(revealRate(300, false)).toBeCloseTo((300 * 1000) / REVEAL_MAX_LAG_MS);
+    expect(revealRate(300, true)).toBeGreaterThan(revealRate(300, false));
+    // A fast model: 400 chars/s, flushed every 75 ms, rendered at 60 fps for 4 s.
+    let s = animated();
+    const cps = 400;
+    let sent = 0;
+    let seq = 4;
+    let worstLagMs = 0;
+    for (let t = 0; t < 4000; t += 16) {
+      if (Math.floor(t / 75) !== Math.floor((t - 16) / 75)) {
+        const want = Math.floor((t / 1000) * cps);
+        const chunk = 'word '.repeat(Math.ceil((want - sent) / 5));
+        s = apply(s, deltaAt(seq++, 'A', chunk, sent));
+        sent += chunk.length;
+      }
+      s = advanceReveal(s, 16);
+      worstLagMs = Math.max(worstLagMs, ((sent - shown(s, 'A').length) / cps) * 1000);
+    }
+    expect(worstLagMs).toBeLessThan(450);
+    expect(shown(s, 'A').length).toBeGreaterThan(sent - cps * 0.45);
+  });
+
+  it('a freeze stops the reveal exactly where it is; renderedCounts reports what is on screen', () => {
+    let s = apply(animated(), deltaAt(4, 'A', 'one two three four five six ', 0), deltaAt(5, 'B', 'alpha beta ', 0));
+    s = advanceReveal(s, 60);
+    const before = shown(s, 'A');
+    expect(before.length).toBeGreaterThan(0);
+    expect(before.length).toBeLessThan(msg(s, 'A').text.length);
+    expect(renderedCounts(s).A).toBe(before.length); // displayed, not received
+    s = freezeFor(s, '@Maya shorter');
+    expect(s.frozen.get('A')).toBe(before.length);
+    s = frames(apply(s, deltaAt(6, 'A', 'seven eight ', msg(s, 'A').text.length)), 30);
+    expect(shown(s, 'A')).toBe(before);
+    expect(renderedCounts(s).A).toBe(before.length);
+    expect(shown(s, 'B')).toBe('alpha beta '); // others keep revealing
+    s = frames(unfreeze(s, ['A']), 60);
+    expect(shown(s, 'A')).toBe('one two three four five six seven eight ');
+  });
+
+  it('a truncating segment or abort clamps the reveal', () => {
+    let s = apply(animated(), deltaAt(4, 'A', 'one two three four ', 0));
+    s = frames(s, 8);
+    const n = shown(s, 'A').length;
+    expect(n).toBeGreaterThan(4);
+    s = apply(s, user(5, 'u2'), segStart(6, 'A', 1, 4, 'continue'));
+    expect(shown(s, 'A')).toBe('one ');
+    expect(s.reveal.get('A')!.shown).toBeLessThanOrEqual(4);
+    s = apply(s, deltaAt(7, 'A', 'more words here ', 4, 1));
+    expect(shown(s, 'A')).toBe('one '); // the continuation is revealed from the cut, not shown at once
+    s = frames(s, 6);
+    expect(shown(s, 'A').length).toBeGreaterThan(4);
+    s = apply(s, aborted(8, 'A', 2));
+    expect(shown(s, 'A')).toBe('on');
+    s = frames(s, 2);
+    expect(s.reveal.has('A')).toBe(false);
+    expect(shown(s, 'A')).toBe('on');
+  });
+
+  it('a completed message finishes quickly but not in one frame', () => {
+    let s = apply(animated(), deltaAt(4, 'A', 'x '.repeat(60), 0), completed(5, 'A'));
+    s = advanceReveal(s, 16);
+    expect(shown(s, 'A').length).toBeGreaterThan(0);
+    expect(shown(s, 'A').length).toBeLessThan(120);
+    let n = 1;
+    while (s.reveal.has('A') && n < 100) {
+      s = advanceReveal(s, 16);
+      n++;
+    }
+    expect(shown(s, 'A')).toBe('x '.repeat(60));
+    expect(n * 16).toBeLessThanOrEqual(REVEAL_FINISH_MS + 32);
+    expect(revealPending(s)).toBe(false);
+  });
+
+  it('snapshots, finished messages and reduced motion show text at once', () => {
+    // A snapshot (initial load or reload) is shown whole.
+    const view = apply(initialState(), user(1, 'u1'), started(2, 'A', 'maya'), delta(3, 'A', 'all of it already')).view;
+    let s = withSnapshot(initialState(undefined, { animate: true }), view);
+    expect(shown(s, 'A')).toBe('all of it already');
+    // A reveal in progress is dropped by a snapshot (recovery after a gap).
+    s = apply(s, deltaAt(4, 'A', ' and more', 'all of it already'.length));
+    expect(shown(s, 'A')).toBe('all of it already');
+    s = withSnapshot(s, s.view);
+    expect(shown(s, 'A')).toBe('all of it already and more');
+    // Reduced motion: deltas show as they arrive.
+    const still = apply(initialState(undefined, { animate: false }), user(1, 'u1'), started(2, 'A', 'maya'), delta(3, 'A', 'now'));
+    expect(shown(still, 'A')).toBe('now');
+    const off = setAnimate(apply(animated(), deltaAt(4, 'A', 'hello there ', 0)), false);
+    expect(shown(off, 'A')).toBe('hello there ');
+  });
+
+  it('never splits a surrogate pair inside a long unbroken run', () => {
+    let s = apply(animated(), deltaAt(4, 'A', '😀'.repeat(40), 0));
+    for (let i = 0; i < 40 && s.reveal.has('A'); i++) {
+      s = advanceReveal(s, 16);
+      const t = shown(s, 'A');
+      if (t.length > 0) expect(t.charCodeAt(t.length - 1)).not.toBe(0xd83d);
+      expect(t.length % 2).toBe(0);
+    }
+  });
+
+  it('held words from before a rewrite stay until the rewrite shows its first word', () => {
+    let s = apply(animated(), deltaAt(4, 'B', 'Old answer ', 0));
+    s = frames(s, 20);
+    expect(shown(s, 'B')).toBe('Old answer ');
+    s = apply(s, user(5, 'u2'), segStart(6, 'B', 1, 0, 'replace'), deltaAt(7, 'B', 'New words ', 0, 1));
+    expect(shown(s, 'B')).toBe('Old answer ');
+    expect(shownMessages(s).find((m) => m.id === 'B')?.typing).toBe(false);
+    s = frames(s, 4);
+    expect(shown(s, 'B')).toBe('New ');
+    expect(s.held.has('B')).toBe(false);
+    // Completing before anything was revealed still does not flash dots.
+    s = apply(s, user(8, 'u3'), segStart(9, 'B', 2, 0, 'replace'), deltaAt(10, 'B', 'Short.', 0, 2), completed(11, 'B'));
+    expect(shown(s, 'B')).toBe('New '); // the words that were on screen
+    s = frames(s, 20);
+    expect(shown(s, 'B')).toBe('Short.');
+    expect(s.held.has('B')).toBe(false);
+  });
+});
 
 describe('client conversation state', () => {
   it('freeze holds text while deltas arrive', () => {
@@ -256,13 +413,29 @@ describe('client conversation state', () => {
     expect(shownMessages(s).at(-1)).toMatchObject({ text: 'hello', failed: true });
   });
 
-  it('hides agent bubbles until they have words', () => {
-    let s = apply(initialState(), user(1, 'u1'), started(2, 'A', 'maya'));
-    expect(shownMessages(s).map((m) => m.id)).toEqual(['u1']);
+  it('shows typing dots once a message started, until it has words; an empty ended message has no bubble', () => {
+    const typing = (s: ClientState) => shownMessages(s).map((m) => `${m.id}${m.typing ? '…' : ''}`);
+    let s = apply(initialState(), user(1, 'u1'));
+    expect(typing(s)).toEqual(['u1']); // nobody has started: no dots (gating is invisible)
+    s = apply(s, started(2, 'A', 'maya'));
+    expect(typing(s)).toEqual(['u1', 'A…']);
     s = apply(s, delta(3, 'A', 'Hi'));
-    expect(shownMessages(s).map((m) => m.id)).toEqual(['u1', 'A']);
-    s = apply(s, started(4, 'B', 'theo'), aborted(5, 'B', 0));
-    expect(shownMessages(s).map((m) => m.id)).toEqual(['u1', 'A']);
+    expect(typing(s)).toEqual(['u1', 'A']);
+    s = apply(s, started(4, 'B', 'theo'));
+    expect(typing(s)).toEqual(['u1', 'A', 'B…']);
+    s = apply(s, aborted(5, 'B', 0));
+    expect(typing(s)).toEqual(['u1', 'A']);
+    s = apply(s, started(6, 'C', 'priya'), ev(7, { type: 'message_aborted', messageId: 'C', reason: 'error', truncateTo: 0 }));
+    expect(typing(s)).toEqual(['u1', 'A']);
+  });
+
+  it('a steered restart with nothing kept shows dots; a replace keeps its held words instead', () => {
+    const typing = (s: ClientState, id: string) => shownMessages(s).find((m) => m.id === id)?.typing;
+    let s = apply(twoStreaming(), user(6, 'u2'), segStart(7, 'A', 1, 0, 'continue'));
+    expect(typing(s, 'A')).toBe(true);
+    s = apply(s, segStart(8, 'B', 1, 0, 'replace'));
+    expect(typing(s, 'B')).toBe(false);
+    expect(shown(s, 'B')).toBe('Theo says');
   });
 
   it('surfaces sequence gaps', () => {
