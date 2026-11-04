@@ -49,6 +49,7 @@ Key properties:
 
 - **Single writer.** `ConversationActor.append` is the only place a `seq` is assigned and a row inserted. It persists, folds into `actor.view`, then notifies subscribers synchronously, so the log order is the delivery order.
 - **Log is truth.** `fold(log) == actor.view`. A client that connects takes `snapshot` (view at `lastSeq`) then opens SSE from that seq; the server subscribes before replaying and dedupes by seq, so nothing falls in the gap. `Last-Event-ID` resumes after a drop. The client reducer throws `GapError` on a missed seq and refetches.
+- **Display order is a fold too.** Messages show in `anchorSeq` order: the seq of their start event, or of the latest `message_segment_started` with `moved: true`. Only a user steer sets `moved` (a mid-stream restart, a debounced re-restart, or the reopen of a just-finished message), so a steered answer moves to sit after the steer that redirected it, keeping its id, its bubble and, in continue mode, the text already shown. The reducer moves the message to the end of the array, which is the same thing because a segment event is always the newest. The compliance redo, stops and unsteered agents never move anything; logs written before the field existed fold exactly as before.
 - **Crash recovery.** On actor construction any message still `streaming` gets `message_aborted(server_restart)`.
 - **Steering never waits on the model to be responsive.** The client freezes the visible text of a targeted agent locally (regex target parse) before the POST returns; the server's classifier decides what actually happens, then a `steer_resolved` event releases the freeze. The freeze also times out after 7 s (above the server's 6 s classifier cap).
 - **Fail-soft model calls.** Gate, dedup, classifier and judge calls are structured calls with timeouts; each falls back (e.g. classifier failure treated as a plain steer to the regex targets) rather than blocking the chat.
@@ -75,21 +76,22 @@ sequenceDiagram
   H->>C: classify(text, streaming partials, recent, standing instructions)
   C-->>H: kind=steer, targets=[theo], apply, scope
   H->>T: abort current segment, cut at what the client displayed
-  H->>A: append message_segment_started (truncateTo, mode continue or replace)
+  H->>A: append message_segment_started (truncateTo, mode continue or replace, moved)
   A-->>B: SSE message_segment_started
+  B->>B: move Theo's bubble below the steer (seq N), unfreeze it
   H->>T: new stream with the steer text in context
   T->>A: token_delta (new segment, STEERED text)
   A-->>B: SSE token_delta
   M->>A: token_delta continues untouched
   H->>A: append steer_resolved (userMessageId, targets)
   A-->>B: SSE steer_resolved
-  B->>B: unfreeze Theo, show buffered text from the new segment
+  B->>B: Theo's bubble streams the new segment below the steer
   opt scope is standing
     H->>A: append instruction_set, later turns see it in the prompt
   end
 ```
 
-Variants handled by the same path: `stop` appends `stop_all` and `message_aborted(user_stop)` for the targets; a steer landing within 2 s of a finished message **reopens** it (a new segment on the same message); a message with fewer than about 10 words is `replace`d rather than continued. After a steer, a one-time judge call checks the new text complied and can redo once.
+Variants handled by the same path: `stop` appends `stop_all` and `message_aborted(user_stop)` for the targets; a steer landing within 2 s of a finished message **reopens** it (a new segment on the same message, moved below the steer like a restart); a message with fewer than about 10 words is `replace`d rather than continued. After a steer, a one-time judge call checks the new text complied and can redo once; that redo is not a user steer, so the answer stays where it is. When one steer redirects several agents, they move in the order they were already shown.
 
 ## Event log
 
@@ -100,7 +102,7 @@ Source: `src/shared/events.ts`. Every row also carries `seq`, `conversationId`, 
 | `user_message` | `messageId, clientMsgId, text` | adds a human message; `clientMsgId` makes POST retries idempotent |
 | `message_started` | `messageId, agentId, turnId, hop, replyTo, contextCutoffSeq, effort` | opens an empty streaming agent message |
 | `token_delta` | `messageId, segment, offset, text` | appends text; `offset` must equal current length |
-| `message_segment_started` | `messageId, segment, contextCutoffSeq, truncateTo, mode` | supersedes the old segment; cuts text to `truncateTo`, `replace` clears it |
+| `message_segment_started` | `messageId, segment, contextCutoffSeq, truncateTo, mode, moved?` | supersedes the old segment; cuts text to `truncateTo`, `replace` clears it; `moved` (user steers only) moves the message to the end and sets its `anchorSeq` to this seq |
 | `message_completed` | `messageId` | closes the message |
 | `message_aborted` | `messageId, reason (user_stop, error, server_restart), truncateTo` | closes it, keeping text up to `truncateTo` |
 | `instruction_set` | `instructionId, scope (agent or all), text` | adds a standing instruction |
@@ -121,6 +123,7 @@ Checked by `tests/property/invariants.test.ts` (fast-check, random interleavings
 7. Budgets hold: hops at most 3 and at most 7 agent messages per turn.
 8. When idle nothing is `streaming` and no generations are live.
 9. Recovery on restart appends only `message_aborted(server_restart)` for dangling streams.
+10. Display order equals messages sorted by `anchorSeq`, recomputed from the log (start seq, or the latest `moved` segment), and a `moved` segment only appears while a user message is still being decided.
 
 ## Deployment notes
 

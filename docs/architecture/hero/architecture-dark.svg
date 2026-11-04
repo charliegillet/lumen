@@ -65,8 +65,9 @@
 <rect x="666" y="396" width="194" height="100" rx="14" fill="#161B22" stroke="#30363D" filter="url(#sh)"/>
 <rect x="666" y="396" width="5" height="100" fill="#3A9CC4" clip-path="url(#c6)"/>
 <text x="684" y="425" font-size="15" font-weight="650" fill="#E6EDF3">Append-only events</text>
-<text x="684" y="448" font-size="13" fill="#9DA7B3">Bubbles order by start</text>
-<text x="684" y="467" font-size="13" fill="#9DA7B3">seq; reload is a replay</text>
+<text x="684" y="448" font-size="13" fill="#9DA7B3">Bubbles order by start seq</text>
+<text x="684" y="467" font-size="13" fill="#9DA7B3">(or the steer that moved</text>
+<text x="684" y="486" font-size="13" fill="#9DA7B3">them); reload is a replay</text>
 <clipPath id="c7"><rect x="666" y="512" width="194" height="100" rx="14"/></clipPath>
 <rect x="666" y="512" width="194" height="100" rx="14" fill="#161B22" stroke="#30363D" filter="url(#sh)"/>
 <rect x="666" y="512" width="5" height="100" fill="#3A9CC4" clip-path="url(#c7)"/>

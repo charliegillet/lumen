@@ -60,13 +60,14 @@ Lumen treats the conversation as an append-only event log with a single writer. 
 | **1** | **Send.** The browser posts the message with a client-generated id, so retries are idempotent. If it names an agent who is still typing, that bubble freezes immediately, before any round trip. | ![React](https://img.shields.io/badge/-React%2019-61DAFB?style=flat-square&logo=react&logoColor=black) ![Hono](https://img.shields.io/badge/-Hono-E36002?style=flat-square&logo=hono&logoColor=white) |
 | **2** | **Append.** One in-memory `ConversationActor` per conversation is the only writer. It assigns a gap-free `seq` and inserts the `user_message` row with no `await` in between, then notifies subscribers in `seq` order. | ![SQLite](https://img.shields.io/badge/-SQLite%20WAL-003B57?style=flat-square&logo=sqlite&logoColor=white) |
 | **3** | **Decide.** Steering runs first: a regex finds `@names` and bare stops; an LLM classifier decides steer or new message, continue or replace, one-off or standing. A new message starts a turn, where each agent's bid gate reads its own private notes and decides whether to speak and with what effort. Dedup keeps one agent per point. | ![TypeScript](https://img.shields.io/badge/-TypeScript-3178C6?style=flat-square&logo=typescript&logoColor=white) ![OpenAI](https://img.shields.io/badge/-gpt--5.6--luna-412991?style=flat-square&logo=openai&logoColor=white) |
-| **4** | **Stream.** Selected agents stream concurrently in waves (at most 7 agent messages and 3 agent-to-agent hops per turn; small talk is capped lower). Token deltas are appended to the log in ~75 ms batches. A steer aborts the target's current segment and restarts it in the same bubble, with the steer as the final user turn. | ![Vercel AI SDK](https://img.shields.io/badge/-Vercel%20AI%20SDK-000000?style=flat-square&logo=vercel&logoColor=white) |
+| **4** | **Stream.** Selected agents stream concurrently in waves (at most 7 agent messages and 3 agent-to-agent hops per turn; small talk is capped lower). Token deltas are appended to the log in ~75 ms batches. A steer aborts the target's current segment and restarts it in the same bubble, with the steer as the final user turn; that bubble moves to sit right after the steer, so the conversation still reads in order. | ![Vercel AI SDK](https://img.shields.io/badge/-Vercel%20AI%20SDK-000000?style=flat-square&logo=vercel&logoColor=white) |
 | **5** | **Deliver.** Server-sent events carry `id: seq`. A client that drops or reloads replays everything after its last `seq`, then continues live (20 s keep-alive ping). The browser renders a pure fold of the log with the same reducer the server uses. | ![Hono](https://img.shields.io/badge/-SSE-E36002?style=flat-square&logo=hono&logoColor=white) ![React](https://img.shields.io/badge/-reducer-61DAFB?style=flat-square&logo=react&logoColor=black) |
 
 Other details:
 
 - **Standing instructions** ("from now on, answer in French") are log rows (`instruction_set` / `instruction_revoked`). They are rebuilt into every prompt and replay on reload like everything else.
-- **Late steers.** A steer that lands within 2 s of a finished message reopens that message.
+- **Late steers.** A steer that lands within 2 s of a finished message reopens that message, which moves below the steer.
+- **Display order.** Bubbles are ordered by their start `seq`, or by the `seq` of the user steer that moved them. Both come from the log, so a reload shows the same order.
 - **Fail-soft.** Gate, dedup, classifier and judge calls have timeouts and fallbacks. A classifier failure is treated as a plain steer to the regex targets, so the chat never blocks on a model.
 - **Crash recovery.** On start, any message still marked streaming gets `message_aborted(server_restart)`.
 
@@ -94,7 +95,7 @@ Questions that need combined knowledge:
 
 Steering and persistence:
 
-- Ask something broad, then send `@Theo one sentence` while he is streaming. Only Theo's bubble changes; Maya and Priya keep going.
+- Ask something broad, then send `@Theo one sentence` while he is streaming. Theo's answer moves below your message and follows it; Maya and Priya keep going where they were.
 - Send `everyone stop` (or press Stop) mid-answer.
 - Send `from now on, answer in French`, ask another question, then reload. The instruction is still in force.
 - Reload in the middle of a stream. The conversation comes back in the same order and the live bubbles resume.
@@ -142,7 +143,7 @@ MODEL_JUDGE=openai:gpt-6-sol
 
 | Check | Result |
 |---|---|
-| `npm test`: unit (153), integration (143) and property (1 suite), all against a scripted fake LLM so races are reproducible | **297 passed** in 16 files, ~12 s |
+| `npm test`: unit (161), integration (151) and property (1 suite), all against a scripted fake LLM so races are reproducible | **313 passed** in 16 files, ~12 s |
 | `npm run test:e2e`: Playwright against the real built server in fake mode, Chromium (stream, steer, stop, reload mid-stream and after, standing instruction across reload, no internals in the UI) | **7 of 7 passed**, ~20 s |
 | Property tests: fast-check over random interleavings of sends, steers, stops, reloads, token arrival and 75 ms flush timers, with fake timers | **100 runs** per `npm test`; **13,000 runs** passed with `PROPERTY_RUNS=13000` (~160 s) |
 | `npm run typecheck` (strict) | clean |
@@ -156,7 +157,8 @@ Measured on 2026-11-03 on this repository. Invariants the tests defend, regardle
 4. Every user message gets exactly one `steer_resolved`.
 5. Hop and message budgets hold; when idle, nothing is streaming.
 6. Restart only appends `message_aborted(server_restart)` for dangling streams.
-7. Private notes never appear in another agent's prompt (checked with per-persona canary strings).
+7. Display order is start `seq`, or the `seq` of the steer that moved a message, recomputed from the log; only user steers move messages.
+8. Private notes never appear in another agent's prompt (checked with per-persona canary strings).
 
 Ordering, steering, stop and persistence are tested deterministically. What the models say is not; it is only measured by evals.
 
@@ -191,7 +193,7 @@ Full table and representative failures: [docs/notes/eval-results.md](docs/notes/
 | ✅ **Group chat** | Three personas streaming concurrently with private notes, bid gate, dedup, waves and budgets |
 | ✅ **Steering** | `@Name` steers, stop, continue or replace, standing instructions, late-steer reopen; instant client-side freeze |
 | ✅ **Ordering and persistence** | Single-writer event log in SQLite WAL; reload and reconnect replay by `seq`; crash recovery |
-| ✅ **Tests** | 297 Vitest tests, 7 Playwright specs, property tests (13,000 runs explored), strict typecheck |
+| ✅ **Tests** | 313 Vitest tests, 7 Playwright specs, property tests (13,000 runs explored), strict typecheck |
 | ✅ **Real-model evals** | Harness and cases built and run against OpenAI; results in [docs/notes/eval-results.md](docs/notes/eval-results.md) |
 | ✅ **Deploy** | Live on Fly.io: [lumen-group-chat.fly.dev](https://lumen-group-chat.fly.dev) (one machine, SQLite on a volume, rate-limited) |
 
