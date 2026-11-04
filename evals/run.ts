@@ -107,7 +107,7 @@ function scoreOf(s: Summary): string {
 }
 
 function markdown(sums: Summary[], k: number): string {
-  const date = new Date().toISOString().slice(0, 10);
+  const date = new Date().toLocaleDateString('en-CA');
   const models = (['agent', 'gate', 'classifier', 'judge'] as const)
     .map((r) => `${r} \`${modelSpec(r)}\``)
     .join(', ');
@@ -140,7 +140,7 @@ function writeReadmeSummary(sums: Summary[], k: number): void {
   if (!existsSync(README)) return;
   const prev = readFileSync(README, 'utf8');
   if (!prev.includes(SUM_BEGIN) || !prev.includes(SUM_END)) return;
-  const date = new Date().toISOString().slice(0, 10);
+  const date = new Date().toLocaleDateString('en-CA');
   const parts = sums.map((s) => `${s.name} ${s.runs.filter((r) => r.pass).length}/${s.runs.length}`);
   const body = `Latest run (${date}, k=${k}, agents \`${modelSpec('agent')}\`, judge \`${modelSpec('judge')}\`): ${parts.join(', ')}.`;
   writeFileSync(README, prev.slice(0, prev.indexOf(SUM_BEGIN) + SUM_BEGIN.length) + `\n${body}\n` + prev.slice(prev.indexOf(SUM_END)));
