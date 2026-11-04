@@ -272,9 +272,13 @@ button {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  min-height: 40px;
-  padding-top: 0;
-  padding-bottom: 0;
+}
+
+/* Same height as a one-line bubble, without putting any text in it. */
+.bubble-typing::before {
+  content: '';
+  height: 1.5em;
+  margin-right: -4px;
 }
 
 .typing-dot {
