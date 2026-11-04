@@ -646,6 +646,8 @@ export function useConversation(id: string): Conversation {
       es?.close();
       if (retryTimer !== null) clearTimeout(retryTimer);
       if (frame.current !== null) cancelAnimationFrame(frame.current);
+      frame.current = null;
+      lastFrameAt.current = null;
     };
   }, [base, update]);
 
