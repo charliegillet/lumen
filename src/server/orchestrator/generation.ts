@@ -34,6 +34,8 @@ interface Segment {
   startedAt: number;
   /** Has a token_delta from this segment been appended? */
   visible: boolean;
+  /** Replace only: the text it cleared, put back if it fails before writing anything. */
+  readonly restore: string;
 }
 
 interface ReopenArgs {
@@ -115,7 +117,8 @@ export class Generation {
     this.hop = r.hop;
     this.effort = r.effort;
     this.segment = r.segment;
-    this.current = newSegment(r.segment, '');
+    const previous = actor.view.messages.find((m) => m.id === r.messageId)?.text ?? '';
+    this.current = newSegment(r.segment, '', previous);
     this.begin({
       type: 'message_segment_started',
       messageId: r.messageId,
@@ -154,11 +157,14 @@ export class Generation {
     const committed = this.textSoFar();
     const keep = mode === 'continue' ? clamp(truncateTo, committed.length) : 0;
     const partial = committed.slice(0, keep);
+    // A replace cut back to nothing yet keeps what it cleared (or what an
+    // earlier replace that never wrote had cleared).
+    const restore = mode === 'replace' ? (committed !== '' ? committed : this.current.restore) : '';
     this.retire(this.current); // unflushed text was never visible: drop it
 
     this.segment += 1;
     this.firstTokenSeen = false;
-    this.current = newSegment(this.segment, partial);
+    this.current = newSegment(this.segment, partial, restore);
     const cutoff = this.actor.lastSeq;
     try {
       this.actor.append({
@@ -330,6 +336,17 @@ export class Generation {
     try {
       this.releaseHead(seg);
       this.flush(seg);
+      // A rewrite that failed before writing anything must not erase the
+      // answer it was replacing: put the old text back in this segment.
+      if (!seg.visible && seg.restore !== '' && this.textSoFar() === '') {
+        this.actor.append({
+          type: 'token_delta',
+          messageId: this.messageId,
+          segment: seg.segment,
+          offset: 0,
+          text: seg.restore,
+        });
+      }
     } catch {
       // fall through to the abort below with whatever is committed
     }
@@ -364,8 +381,9 @@ export class Generation {
   }
 }
 
-function newSegment(segment: number, partial: string): Segment {
+function newSegment(segment: number, partial: string, restore = ''): Segment {
   return {
+    restore,
     segment,
     ctrl: new AbortController(),
     buf: '',

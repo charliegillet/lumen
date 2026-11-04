@@ -550,6 +550,52 @@ describe('reopenGeneration', () => {
     expect(msg(g)?.text).toBe('x y z.');
   });
 
+  it('a rewrite that fails before its first token puts the answer back', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    setFakeScript((r) =>
+      r.kind === 'replace' ? { error: 'provider down' } : { chunks: ['A long ', 'answer.'], delayMs: 5 },
+    );
+    const g = start('theo');
+    await g.done;
+    const r = reopenGeneration(actor, g.messageId, ['shorter']);
+    expect(await r.done).toBe('error');
+    expect(msg(g)).toMatchObject({ text: 'A long answer.', status: 'stopped', segment: 1 });
+    const tail = eventsFor(g).slice(-2);
+    expect(tail[0]).toMatchObject({ type: 'token_delta', segment: 1, offset: 0, text: 'A long answer.' });
+    expect(tail[1]).toMatchObject({ type: 'message_aborted', reason: 'error', truncateTo: 'A long answer.'.length });
+    expect(visibleMessages(actor.view).some((m) => m.id === g.messageId)).toBe(true);
+  });
+
+  it('a live replace that fails before its first token keeps the earlier text, even after a second replace', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    let calls = 0;
+    setFakeScript(() => {
+      calls += 1;
+      if (calls === 1) return { chunks: Array.from({ length: 20 }, (_, i) => `w${i} `), delayMs: 20 };
+      if (calls === 2) return { chunks: ['never'], delayMs: 200 };
+      return { error: 'provider down' };
+    });
+    const g = start();
+    await waitFor(() => g.textSoFar().length > 0);
+    const before = g.textSoFar();
+    expect(g.restart('replace', 0, ['one'])).toBe(true);
+    expect(g.restart('replace', 0, ['two'])).toBe(true);
+    expect(await g.done).toBe('error');
+    expect(msg(g)?.text).toBe(before);
+  });
+
+  it('a rewrite that wrote something before failing keeps only the new text', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    setFakeScript((r) =>
+      r.kind === 'replace' ? { error: 'cut off', afterChunks: 1 } : { chunks: ['Old text.'], delayMs: 5 },
+    );
+    const g = start();
+    await g.done;
+    const r = reopenGeneration(actor, g.messageId, ['x']);
+    expect(await r.done).toBe('error');
+    expect(msg(g)?.text).toBe('c0');
+  });
+
   it('refuses a live or unknown message', async () => {
     setFakeScript(() => ({ chunks: ['a', 'b'], delayMs: 20 }));
     const g = start();
