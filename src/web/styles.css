@@ -267,6 +267,22 @@ button {
   padding-right: 10%;
 }
 
+/* A bubble that just took a new place in the thread eases in there. */
+.row.arrive {
+  animation: arrive 0.22s ease-out;
+}
+
+@keyframes arrive {
+  from {
+    opacity: 0.35;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
 .gutter {
   width: 32px;
   flex: none;
@@ -630,6 +646,7 @@ button {
 @media (prefers-reduced-motion: reduce) {
   * {
     transition: none !important;
+    animation: none !important;
     scroll-behavior: auto !important;
   }
 }

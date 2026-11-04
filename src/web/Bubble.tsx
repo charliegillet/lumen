@@ -1,4 +1,4 @@
-import { memo, type ReactNode } from 'react';
+import { memo, useLayoutEffect, useRef, type ReactNode } from 'react';
 import type { AgentId } from '../shared/events.js';
 
 export const AGENTS: Record<AgentId, { name: string; role: string; initial: string }> = {
@@ -59,9 +59,27 @@ interface BubbleProps {
   last: boolean;
   failed: boolean;
   onRetry?: () => void;
+  /** Display position (anchorSeq). When it changes after mount the bubble eases in at its new place. */
+  anchor?: number;
 }
 
-export const Bubble = memo(function Bubble({ agentId, text, first, last, failed, onRetry }: BubbleProps) {
+/** Replays a short arrival animation on the row whenever `anchor` changes after the first render. */
+function useArrival(anchor: number | undefined) {
+  const ref = useRef<HTMLDivElement>(null);
+  const seen = useRef(anchor);
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (seen.current === anchor || !el) return;
+    seen.current = anchor;
+    el.classList.remove('arrive');
+    void el.offsetWidth; // restart the animation if it is still running
+    el.classList.add('arrive');
+  }, [anchor]);
+  return ref;
+}
+
+export const Bubble = memo(function Bubble({ agentId, text, first, last, failed, onRetry, anchor }: BubbleProps) {
+  const ref = useArrival(anchor);
   if (agentId === null) {
     return (
       <div className={`row row-user${first ? ' first' : ''}${last ? ' last' : ''}`}>
@@ -78,7 +96,12 @@ export const Bubble = memo(function Bubble({ agentId, text, first, last, failed,
   }
   const a = AGENTS[agentId];
   return (
-    <div className={`row row-agent${first ? ' first' : ''}${last ? ' last' : ''}`} data-agent={agentId}>
+    <div
+      ref={ref}
+      className={`row row-agent${first ? ' first' : ''}${last ? ' last' : ''}`}
+      data-agent={agentId}
+      onAnimationEnd={(e) => e.currentTarget.classList.remove('arrive')}
+    >
       <div className="gutter">{first ? <Avatar agentId={agentId} /> : null}</div>
       <div className="stack">
         {first && (
