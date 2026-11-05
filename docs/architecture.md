@@ -120,11 +120,20 @@ Checked by `tests/property/invariants.test.ts` (fast-check, random interleavings
 3. Each message has one `message_started`; segments only increase; every segment closes exactly once (completed or aborted).
 4. No `token_delta` after its segment is closed or superseded, and none after a `stop_all` that hit it.
 5. `token_delta.offset` equals the message's current text length.
-6. Every `user_message` gets exactly one later `steer_resolved`.
+6. Every `user_message` gets exactly one later `steer_resolved`. Caveat: a process crash between the `user_message` append and its resolution leaves it unresolved, and recovery does not retry it (it only closes dangling streams); clients release their freeze after 7 s.
 7. Budgets hold: hops at most 3 and at most 7 agent messages per turn.
 8. When idle nothing is `streaming` and no generations are live.
 9. Recovery on restart appends only `message_aborted(server_restart)` for dangling streams.
 10. Display order equals messages sorted by `anchorSeq`, recomputed from the log (start seq, or the latest `moved` segment), and a `moved` segment only appears while a user message is still being decided.
+
+## Limits and known gaps
+
+- **History window.** `buildPrompt` sends each agent the last 40 finished messages (`HISTORY_LIMIT`) plus a note that older ones exist; earlier facts are not in context.
+- **Rate limits.** 20 new messages per minute per client IP (`RATE_LIMIT_PER_MIN`, with a higher allowance while a reply is streaming so steers and stops are not blocked) and 300 user messages per conversation (`MAX_MESSAGES_PER_CONV`). Retries of an already delivered message are never limited.
+- **Tabs.** Every open tab holds one SSE stream. Over HTTP/1.1 browsers allow about 6 connections per origin, so a 7th tab may stall; Fly's HTTP/2 proxy avoids this.
+- **Cut-back on reload or a second tab.** `rendered` counts describe what one tab displayed. A reload or another tab has no freeze for a steer sent elsewhere and shows all committed text, so it can briefly see text cut back, and a steer or stop sent from it cuts at the committed length.
+- **Crash during classification.** See invariant 6: the unresolved message is not retried after a restart.
+- **Rendering.** Bubbles render line breaks, `**bold**` and `@mentions`; no other markdown.
 
 ## Deployment notes
 

@@ -119,7 +119,7 @@ Then open http://localhost:8080. `run.sh` checks the Node version, installs depe
 | `npm test` | unit, integration and property tests (Vitest) |
 | `npm run test:e2e` | Playwright against the built server with fake models |
 | `npm run typecheck` | `tsc --noEmit`, strict |
-| `npm run eval` | real-model evals; `-- --case <name>`, `-- --k <n>` |
+| `npm run eval` | real-model evals; `-- --case <name>`, `-- --k <n>`; add `-- --write` to update the eval notes and the README summary |
 | `npm run spike` | time-to-first-token latency probe |
 
 Settings live in `.env` (see [.env.example](.env.example)): the API key for each provider you use (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_GENERATIVE_AI_API_KEY`), the `MODEL_*` strings below, `DB_PATH` (default `./data/chat.db`) and `PORT` (default 8080). The server checks the model strings and keys at startup and exits with a one-line reason if one is unusable (a typo, an unknown provider, a missing key); `/api/health` lists the models in use. A blank `MODEL_*=` line counts as unset. Provider calls are retried twice on 429 or 5xx before the first token, and every failed call is logged with its cause.
@@ -158,7 +158,7 @@ Measured on 2026-11-04 on this repository. Invariants the tests defend, regardle
 1. `seq` is gap-free and increasing; clients see exactly the log.
 2. `fold(log)` equals the live view; snapshot plus catch-up equals the view; a fresh actor over the same database reaches the same view.
 3. Every segment closes exactly once; no token arrives after its segment is closed, superseded or stopped; offsets match the current text length.
-4. Every user message gets exactly one `steer_resolved`.
+4. Every user message gets exactly one `steer_resolved`, unless the process dies while it is still being classified (see Known gaps).
 5. Hop and message budgets hold; when idle, nothing is streaming.
 6. Restart only appends `message_aborted(server_restart)` for dangling streams.
 7. Display order is start `seq`, or the `seq` of the steer that moved a message, recomputed from the log; only user steers move messages.
@@ -222,7 +222,10 @@ fly deploy
 - No load or soak testing.
 - E2E runs on Chromium only.
 - LLM behaviours (attribution, steer compliance, redundancy) are measured, not guaranteed.
-- Plain-text bubbles: no streaming markdown rendering.
+- Bubbles render plain text with line breaks, `**bold**` and `@mentions` only; lists, code blocks and links stay as typed.
+- Agents see only the last 40 messages of the conversation (a note tells them older ones exist), so facts from far back can be forgotten.
+- Abuse guards are coarse: 20 new messages per minute per client IP (a higher allowance while a reply is streaming, so steers and stops get through) and 300 user messages per conversation, both set by env (`RATE_LIMIT_PER_MIN`, `MAX_MESSAGES_PER_CONV`).
+- Each open tab holds one SSE stream. Over plain HTTP/1.1 (for example a local run) browsers allow about 6 connections per origin, so a 7th tab may not connect; Fly serves HTTP/2, which does not have this limit.
 - Three fixed personas; no UI to define agents.
 
 ## Known gaps
@@ -236,7 +239,8 @@ fly deploy
 - **Agents sometimes invent details** that are in nobody's notes (for example what "SSO-lite" includes). No eval checks for this yet.
 - **Theo sometimes reads like Maya** on scope questions; this is the main source of attribution misses.
 - **Stop races at the edges.** A stop decided by the classifier can also cancel a turn started by a message sent during that classification; a targeted "@Theo stop" ends Theo's current message but does not bar him from a later wave of the same turn. Both err toward stopping.
-- **A second open tab does not freeze** on the other tab's steer, so it can briefly see text cut back.
+- **A second open tab does not freeze** on the other tab's steer, so it can briefly see text cut back. A reload or a second tab also reports everything committed as seen, so a steer or stop sent from it cuts at the committed length, not at what another tab had shown.
+- **A crash while a message is being classified** leaves that message without a `steer_resolved`, and nobody answers it after the restart (recovery only closes dangling streams). The client releases its freeze after 7 s; the person has to send the message again.
 - **Client/server clock skew.** The client sends `sentAt` with each message and the server shifts `typingStartedAt` onto its own clock, and the client reports how much text it had rendered with each steer. This reduces skew in time-based decisions such as the 2 s reopen window; it does not eliminate network delay.
 - **Hidden-profile answers are not guaranteed to pool.** Agents sometimes state their own fact without connecting it to a teammate's.
 - Effort selection by the gate is untuned.
