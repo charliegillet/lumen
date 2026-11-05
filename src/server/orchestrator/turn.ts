@@ -3,7 +3,7 @@ import type { AgentId, Effort } from '../../shared/events.js';
 import { parseAddressing, parseMentions } from '../../shared/targets.js';
 import type { ConversationActor } from '../actor.js';
 import { AGENT_IDS } from '../agents/personas.js';
-import { clusterGists, findRepeats, noveltyThreshold, selectSpeakers } from './dedup.js';
+import { clusterGists, findRepeats, hasNewFigures, noveltyThreshold, selectSpeakers } from './dedup.js';
 import { isFailedBid, markFailedBid, runGate, type Bid } from './gate.js';
 import { smallTalkKind } from './smalltalk.js';
 import { startGeneration, type Generation } from './generation.js';
@@ -72,8 +72,6 @@ interface WaveEntry {
 
 /** Coming back after already answering takes the top novelty score. */
 const REENTRY_NOVELTY = 3;
-/** How much of each earlier message later gists are compared with. */
-const SAID_CHARS = 300;
 
 /**
  * Runs one human-triggered turn as a series of waves. Each wave: gate the free
@@ -149,9 +147,16 @@ async function waves(actor: ConversationActor, a: TurnArgs, signal: AbortSignal)
     const cutoff = actor.lastSeq;
     const raw = await gatherBids(actor, asked, forcedNow, cutoff, hop, signal, hop === 0 ? a.prefetched : undefined);
     if (signal.aborted) return;
-    const repeats = hop > 0 ? await findRepeats(raw, said, text, cappedDedup(signal)) : new Set<AgentId>();
+    const repeats = hop > 0 ? await findRepeats(raw, said, text, cappedDedup(signal), spokeThisTurn) : new Set<AgentId>();
     if (signal.aborted) return;
-    const bids = raw.map((b) => (repeats.has(b.agentId) ? { ...b, should_respond: false } : b));
+    const bids = raw.map((b) => {
+      // Someone yet to speak this turn, with figures nobody has given: that is a real fact, and one
+      // message per agent cannot spiral. Whatever a repeat check or a shy novelty score makes of it.
+      if (hop > 0 && b.should_respond && !spokeThisTurn.has(b.agentId) && hasNewFigures(b.gist, said)) {
+        return { ...b, novelty: Math.max(b.novelty, noveltyThreshold(hop)) };
+      }
+      return repeats.has(b.agentId) ? { ...b, should_respond: false } : b;
+    });
 
     // Everyone free passed, but the words point at someone still writing: they
     // get to answer before a teammate is pushed to say "I don't know".
@@ -260,7 +265,7 @@ async function waves(actor: ConversationActor, a: TurnArgs, signal: AbortSignal)
     if (signal.aborted) return;
     if (light || fallback) return; // one light wave, no follow-ups
 
-    for (const s of lastSpoken) if (s.text) said.push(s.text.slice(0, SAID_CHARS));
+    for (const s of lastSpoken) if (s.text) said.push(s.text);
     lastWave = wave.map((w) => w.gen.agentId);
     lastWave.forEach((id) => spokeThisTurn.add(id));
     if (hop === 0) firstWave = lastWave;
@@ -271,7 +276,7 @@ async function waves(actor: ConversationActor, a: TurnArgs, signal: AbortSignal)
       if (!step) return;
       forced = step.forced;
     } else {
-      forced = nextForced(lastSpoken, hop - 1, addressed);
+      forced = nextForced(lastSpoken, hop - 1, addressed, spokeThisTurn);
     }
   }
 }
@@ -451,7 +456,7 @@ function asks(text: string, id: AgentId): boolean {
  * it comes back only when the first wave put a real question to it. Bids that
  * merely address someone count only when the person named nobody.
  */
-function nextForced(spoken: Spoken[], hop: number, addressed: boolean): AgentId[] {
+function nextForced(spoken: Spoken[], hop: number, addressed: boolean, answered: ReadonlySet<AgentId>): AgentId[] {
   const out = new Set<AgentId>();
   const inWave = new Set(spoken.map((s) => s.agentId));
   for (const s of spoken) {
@@ -461,7 +466,8 @@ function nextForced(spoken: Spoken[], hop: number, addressed: boolean): AgentId[
       if (!inWave.has(id) || (hop === 0 && asks(s.text, id))) out.add(id);
     }
     if (addressed) continue;
-    for (const id of s.addresses) if (id !== 'user' && id !== s.agentId && !inWave.has(id)) out.add(id);
+    // A bid aimed at someone who has already answered is no reason to bring them back: only an @mention is.
+    for (const id of s.addresses) if (id !== 'user' && id !== s.agentId && !inWave.has(id) && !answered.has(id)) out.add(id);
   }
   return AGENT_IDS.filter((id) => out.has(id));
 }

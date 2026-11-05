@@ -22,7 +22,7 @@ export async function clusterGists(bids: Bid[], signal: AbortSignal): Promise<Ag
 
   const prompt = [
     'Each line is an agent and the point it intends to make in a group chat.',
-    'Group agents whose points say substantially the same thing. Agents with distinct points stay alone.',
+    'Group agents whose points say substantially the same thing. Agents with distinct points stay alone, and so do agents citing different facts, numbers or dates on the same topic.',
     'Answer with only a JSON object: {"clusters": [["agentId", ...], ...]} using every agent exactly once.',
     '',
     ...live.map((b) => `${b.agentId}: ${b.gist}`),
@@ -61,23 +61,44 @@ export async function clusterGists(bids: Bid[], signal: AbortSignal): Promise<Ag
 
 /** The stand-in id for what the chat already holds; shares the clusters schema. */
 const ALREADY_SAID = 'already_said';
+/** How much of each earlier message later gists are compared with. */
+const SAID_CHARS = 600;
+
+const FIGURE = /\$?\d[\d,.]*\d?\s?(?:k\b|m\b|%)?/gi;
+const figures = (s: string) => (s.match(FIGURE) ?? []).map((f) => f.toLowerCase().replace(/[\s,]/g, ''));
+
+/** The gist cites a number or date that appears nowhere in what was said. */
+export function hasNewFigures(gist: string, said: string[]): boolean {
+  const known = new Set(said.flatMap(figures));
+  return figures(gist).some((f) => !known.has(f));
+}
 
 /**
  * Agents whose gist only repeats something already in the chat. Only later waves
  * need this; the gist is compared with the turn's earlier messages. Any failure
  * means no repeats.
  */
-export async function findRepeats(bids: Bid[], said: string[], ask: string, signal: AbortSignal): Promise<Set<AgentId>> {
+export async function findRepeats(
+  bids: Bid[],
+  said: string[],
+  ask: string,
+  signal: AbortSignal,
+  returning: ReadonlySet<AgentId> = new Set(),
+): Promise<Set<AgentId>> {
   const live = bids.filter((b) => b.should_respond);
   if (live.length === 0 || said.length === 0) return new Set();
+  const comeback = live.map((b) => b.agentId).filter((id) => returning.has(id));
   const prompt = [
     `The person asked: «${ask}»`,
     'Each line starting with an agent id is the point that agent intends to make in the group chat.',
     `Lines starting with ${ALREADY_SAID} are already in the chat.`,
-    `Group an agent with ${ALREADY_SAID} when its point repeats what is there, or is only related news that changes nothing about the answer to what the person asked. An agent stays alone only if it corrects, contradicts or completes that answer.`,
+    `Group an agent with ${ALREADY_SAID} when its point restates what is there, only agrees with it, only says it does not know, or is news with no bearing on what the person asked. An agent stays alone if it corrects or contradicts that answer, or adds a fact not yet there that the answer depends on, such as what decides an outcome an earlier line left open. Same topic is not the same point.`,
+    ...(comeback.length > 0
+      ? [`${comeback.join(', ')} already answered, so the bar is higher: group them with ${ALREADY_SAID} unless their point corrects, contradicts or completes the answer. Related news and new detail do not count.`]
+      : []),
     'Answer with only a JSON object: {"clusters": [["agentId", ...], ...]} using every agent exactly once.',
     '',
-    ...said.map((t) => `${ALREADY_SAID}: ${t.replace(/\s+/g, ' ')}`),
+    ...said.map((t) => `${ALREADY_SAID}: ${t.slice(0, SAID_CHARS).replace(/\s+/g, ' ')}`),
     ...live.map((b) => `${b.agentId}: ${b.gist}`),
   ].join('\n');
   try {
