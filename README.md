@@ -11,7 +11,7 @@ Maya, Theo and Priya answer side by side, can be redirected by name while they a
 [![Live demo](https://img.shields.io/badge/Live%20demo-lumen--group--chat.fly.dev-7B3BE2?style=for-the-badge&logo=flydotio&logoColor=white)](https://lumen-group-chat.fly.dev)
 
 [![Tests](https://img.shields.io/badge/tests-330%20passing-2EA44F?style=flat-square)](#quality)
-[![E2E](https://img.shields.io/badge/e2e-7%20passing-2EA44F?style=flat-square)](#quality)
+[![E2E](https://img.shields.io/badge/e2e-8%20passing-2EA44F?style=flat-square)](#quality)
 [![Property runs](https://img.shields.io/badge/property%20runs-100%2Frun%20%C2%B7%2013k%20explored-2EA44F?style=flat-square)](#quality)
 [![Typecheck](https://img.shields.io/badge/tsc%20strict-clean-2EA44F?style=flat-square)](#quality)
 [![Evals](https://img.shields.io/badge/real--model%20evals-25%2F27%20passing-2EA44F?style=flat-square)](#evals)
