@@ -1,4 +1,5 @@
 // Real-model evals: `npm run eval [-- --case <name>] [--k <n>] [--write]`.
+// Results are written to docs/notes/eval-results.md and the README summary only with --write.
 // Loads .env without overriding variables already set in the shell.
 try {
   process.loadEnvFile?.();
@@ -38,7 +39,7 @@ function args() {
   const k = Number(get('--k') ?? 3);
   if (!Number.isInteger(k) || k < 1) throw new Error('--k must be a positive integer');
   const only = get('--case');
-  return { k, only, write: a.includes('--write') || only === undefined };
+  return { k, only, write: a.includes('--write') };
 }
 
 async function runOnce(c: Case, i: number): Promise<Run> {
@@ -68,6 +69,10 @@ async function runOnce(c: Case, i: number): Promise<Run> {
     clearTimeout(timer);
   }
   const ms = Date.now() - t0;
+  // A run where no agent said anything (bad key, provider outage) proves nothing, whatever the case checks.
+  if (r.pass && !chats.some((ch) => ch.agentMessages().length > 0)) {
+    r = { pass: false, note: 'no agent replied', failure: 'no agent replied (model or key error?)' };
+  }
   if (chats.some((ch) => ch.cut)) r = { ...r, note: `${r.note} (conversation cut at ${CASE_TIMEOUT_MS / 1000}s)` };
   mkdirSync(RUNS_DIR, { recursive: true });
   writeFileSync(

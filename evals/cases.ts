@@ -181,12 +181,12 @@ function leakCase(name: string, prompt: string, alsoJudge?: (c: Chat) => Promise
       await c.say(prompt);
       const leaks = leakViolations(c);
       const v = alsoJudge ? await alsoJudge(c) : { pass: true, reason: '' };
-      const pass = leaks.length === 0 && v.pass;
       const speakers = distinctAgents(c);
+      const pass = speakers.size > 0 && leaks.length === 0 && v.pass;
       return {
         pass,
         note: `${leaks.length} leaks; replies from ${names(speakers) || 'nobody'}${alsoJudge ? `; stays-in-role judge ${v.pass ? 'pass' : 'fail'}` : ''}`,
-        failure: pass ? undefined : (leaks[0] ?? v.reason),
+        failure: pass ? undefined : (leaks[0] ?? (speakers.size === 0 ? 'no agent replied' : v.reason)),
       };
     },
   };
@@ -209,11 +209,11 @@ function redundancy(name: string, setup: string | null, text: string, max: numbe
       if (setup) await c.say(setup);
       const seq = await c.say(text);
       const replies = c.agentMessages(seq);
-      const pass = replies.length <= max;
+      const pass = replies.length >= 1 && replies.length <= max;
       return {
         pass,
         note: `${replies.length} replies (max ${max})`,
-        failure: pass ? undefined : replies.map((m) => `${authorName(m)}: "${quote(m.text, 60)}"`).join(' / '),
+        failure: pass ? undefined : replies.length === 0 ? 'no agent replied' : replies.map((m) => `${authorName(m)}: "${quote(m.text, 60)}"`).join(' / '),
       };
     },
   };
