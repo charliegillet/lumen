@@ -67,13 +67,14 @@ const ALREADY_SAID = 'already_said';
  * need this; the gist is compared with the turn's earlier messages. Any failure
  * means no repeats.
  */
-export async function findRepeats(bids: Bid[], said: string[], signal: AbortSignal): Promise<Set<AgentId>> {
+export async function findRepeats(bids: Bid[], said: string[], ask: string, signal: AbortSignal): Promise<Set<AgentId>> {
   const live = bids.filter((b) => b.should_respond);
   if (live.length === 0 || said.length === 0) return new Set();
   const prompt = [
-    'Each line starting with an agent id is the point that agent intends to make in a group chat.',
+    `The person asked: «${ask}»`,
+    'Each line starting with an agent id is the point that agent intends to make in the group chat.',
     `Lines starting with ${ALREADY_SAID} are already in the chat.`,
-    `Group an agent with ${ALREADY_SAID} when its point adds nothing to what is already there. Agents with something new stay alone.`,
+    `Group an agent with ${ALREADY_SAID} when its point repeats what is there, or is only related news that changes nothing about the answer to what the person asked. An agent stays alone only if it corrects, contradicts or completes that answer.`,
     'Answer with only a JSON object: {"clusters": [["agentId", ...], ...]} using every agent exactly once.',
     '',
     ...said.map((t) => `${ALREADY_SAID}: ${t.replace(/\s+/g, ' ')}`),

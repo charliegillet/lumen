@@ -143,7 +143,7 @@ async function waves(actor: ConversationActor, a: TurnArgs, signal: AbortSignal)
     const cutoff = actor.lastSeq;
     const raw = await gatherBids(actor, asked, forcedNow, cutoff, hop, signal, hop === 0 ? a.prefetched : undefined);
     if (signal.aborted) return;
-    const repeats = hop > 0 ? await findRepeats(raw, said, cappedDedup(signal)) : new Set<AgentId>();
+    const repeats = hop > 0 ? await findRepeats(raw, said, text, cappedDedup(signal)) : new Set<AgentId>();
     if (signal.aborted) return;
     const bids = raw.map((b) => (repeats.has(b.agentId) ? { ...b, should_respond: false } : b));
 

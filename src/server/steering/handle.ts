@@ -414,7 +414,9 @@ async function waitBehind(busy: Generation[]): Promise<void> {
       if (!g.isLive()) continue;
       const moved = g.textSoFar().length - (from.get(g) ?? 0);
       const dripping = now - t0 >= QUEUE_DRIP_MS && moved < ((now - t0) / 1000) * QUEUE_DRIP_CHARS_PER_S;
-      if (now - g.lastActivityAt >= QUEUE_STALL_MS || dripping) g.abandon('stalled with a message waiting behind it');
+      // A stream still reasoning towards its first word gets longer before it counts as hung.
+      const patience = g.firstTokenSeen ? QUEUE_STALL_MS : QUEUE_STALL_MS * 3;
+      if (now - g.lastActivityAt >= patience || dripping) g.abandon('stalled with a message waiting behind it');
     }
   }, 250);
   try {
