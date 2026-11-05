@@ -17,6 +17,8 @@ export class ConversationActor {
   readonly id: string;
   readonly generations = new Map<string, Generation>();
   turnAbort: AbortController | null = null;
+  /** Seq of the message the running turn answers. Meaningful while turnAbort is set. */
+  turnTriggerSeq = 0;
 
   private readonly db: Db;
   private _lastSeq = 0;

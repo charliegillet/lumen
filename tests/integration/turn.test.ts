@@ -1,14 +1,18 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { openDb, type Db } from '../../src/server/db.js';
 import { ConversationActor } from '../../src/server/actor.js';
-import { resetFake, setFakeScript, type FakeReply } from '../../src/server/llm/fake.js';
+import { fakeRequests, resetFake, setFakeScript, type FakeReply } from '../../src/server/llm/fake.js';
 import { setStreamTimeouts } from '../../src/server/llm/stream.js';
-import { BUDGET, GATE_TIMEOUT_MS, SMALL_TALK_CAPS, runTurn } from '../../src/server/orchestrator/turn.js';
+import { reopenGeneration } from '../../src/server/orchestrator/generation.js';
+import { BUDGET, GATE_GRACE_MS, GATE_TIMEOUT_MS, NAMED_GATE_MS, SMALL_TALK_CAPS, runTurn } from '../../src/server/orchestrator/turn.js';
 import type { AgentId, ConvEvent } from '../../src/shared/events.js';
 
 // Lets a test make chosen structured calls (gate/dedup) hang until their
 // signal aborts, like a provider that never answers.
-const hooks = vi.hoisted(() => ({ hang: null as null | ((meta: { kind: string; agentId?: string }) => boolean) }));
+const hooks = vi.hoisted(() => ({
+  hang: null as null | ((meta: { kind: string; agentId?: string }) => boolean),
+  delay: null as null | ((meta: { kind: string; agentId?: string }) => Promise<void> | undefined),
+}));
 vi.mock('../../src/server/llm/stream.js', async (importOriginal) => {
   const m = await importOriginal<typeof import('../../src/server/llm/stream.js')>();
   const hangUntilAbort = (signal?: AbortSignal) =>
@@ -19,8 +23,11 @@ vi.mock('../../src/server/llm/stream.js', async (importOriginal) => {
     });
   return {
     ...m,
-    generateStructured: ((a: Parameters<typeof m.generateStructured>[0]) =>
-      hooks.hang?.(a.meta) ? hangUntilAbort(a.signal) : m.generateStructured(a)) as typeof m.generateStructured,
+    generateStructured: (async (a: Parameters<typeof m.generateStructured>[0]) => {
+      const wait = hooks.delay?.(a.meta);
+      if (wait) await wait;
+      return hooks.hang?.(a.meta) ? hangUntilAbort(a.signal) : m.generateStructured(a);
+    }) as typeof m.generateStructured,
   };
 });
 
@@ -71,6 +78,7 @@ beforeEach(() => {
   process.env.MODEL_CLASSIFIER = 'fake:x';
   resetFake();
   hooks.hang = null;
+  hooks.delay = null;
   db = openDb(':memory:');
   actor = new ConversationActor(db, 'c1');
   actor.append({ type: 'user_message', messageId: 'u1', clientMsgId: 'cm1', text: 'What should we build?' });
@@ -81,6 +89,7 @@ afterEach(() => {
   delete process.env.MODEL_CLASSIFIER;
   resetFake();
   hooks.hang = null;
+  hooks.delay = null;
   db.close();
   vi.restoreAllMocks();
 });
@@ -225,6 +234,386 @@ describe('runTurn', () => {
     });
     await runTurn(actor, { triggerMessageId: 'u1', forced: ['priya'] });
     expect(started().map((e) => [e.agentId, e.hop])).toEqual([['priya', 0]]);
+  });
+
+  describe('who may answer', () => {
+    const say = (text: string) => {
+      actor.append({ type: 'user_message', messageId: 'u2', clientMsgId: 'cm2', text });
+    };
+    const eager = () => (_id: AgentId, _n: number): GateAns => ({ should_respond: true, novelty: 3, gist: 'keen' });
+    const plain = () => ({ chunks: ['An answer.'], delayMs: 2 });
+    const whoSpoke = () => started().map((e) => [e.agentId, e.hop]);
+
+    it('one name: only that agent speaks and the others are not even asked', async () => {
+      script({ gate: eager(), reply: plain });
+      say('@Theo what is the status');
+      await runTurn(actor, { triggerMessageId: 'u2', forced: ['theo'] });
+      expect(whoSpoke()).toEqual([['theo', 0]]);
+      expect(fakeRequests.filter((r) => r.kind === 'gate').map((r) => r.agentId)).toEqual(['theo']);
+    });
+
+    it('two names: only those two, in the order named', async () => {
+      script({ gate: eager(), reply: plain });
+      say('Priya and Maya, what is the status?');
+      await runTurn(actor, { triggerMessageId: 'u2', forced: ['priya', 'maya'] });
+      expect(whoSpoke()).toEqual([
+        ['priya', 0],
+        ['maya', 0],
+      ]);
+    });
+
+    it('a named agent that @mentions a third pulls it in, and nobody else', async () => {
+      script({
+        gate: eager(),
+        reply: (id) => ({ chunks: [id === 'theo' ? '@Priya what is the cash position?' : 'Twelve months.'], delayMs: 2 }),
+      });
+      say('@Theo can we afford the discount?');
+      await runTurn(actor, { triggerMessageId: 'u2', forced: ['theo'] });
+      expect(whoSpoke()).toEqual([
+        ['theo', 0],
+        ['priya', 1],
+      ]);
+    });
+
+    it('a named agent bid that merely addresses someone pulls nobody in', async () => {
+      script({ gate: () => ({ should_respond: true, novelty: 3, gist: 'g', addresses: ['maya'] }), reply: plain });
+      say('@Theo status?');
+      await runTurn(actor, { triggerMessageId: 'u2', forced: ['theo'] });
+      expect(whoSpoke()).toEqual([['theo', 0]]);
+    });
+
+    it('a named agent speaks even when every gate declines; the fallback does not add anyone', async () => {
+      script({ gate: () => QUIET, reply: plain });
+      say('@Priya what is the status');
+      await runTurn(actor, { triggerMessageId: 'u2', forced: ['priya'] });
+      expect(whoSpoke()).toEqual([['priya', 0]]);
+    });
+
+    it('"only Priya" holds for the whole turn, even if she @mentions someone', async () => {
+      script({ gate: eager(), reply: () => ({ chunks: ['@Theo can you confirm?'], delayMs: 2 }) });
+      say('Only Priya answer this: will we keep Northwind?');
+      await runTurn(actor, { triggerMessageId: 'u2', forced: ['priya'] });
+      expect(whoSpoke()).toEqual([['priya', 0]]);
+    });
+
+    it('"just you" and "nobody else" hold too', async () => {
+      script({ gate: eager(), reply: () => ({ chunks: ['@Maya thoughts?'], delayMs: 2 }) });
+      say('Priya, just you please: are we okay on cash?');
+      await runTurn(actor, { triggerMessageId: 'u2', forced: ['priya'] });
+      expect(whoSpoke()).toEqual([['priya', 0]]);
+    });
+
+    it('"one of you" gets one answer and no follow-up', async () => {
+      script({ gate: eager(), reply: () => ({ chunks: ['@Maya thoughts?'], delayMs: 2 }) });
+      say('Just one of you answer: is it Tuesday?');
+      await runTurn(actor, { triggerMessageId: 'u2', forced: [] });
+      expect(started()).toHaveLength(1);
+    });
+
+    it('"Everyone:" makes everyone answer even when every gate declines', async () => {
+      script({ gate: () => QUIET, reply: plain });
+      say("Everyone: what's your opinion on the office dog policy?");
+      await runTurn(actor, { triggerMessageId: 'u2', forced: [] });
+      expect(started().map((e) => e.agentId).sort()).toEqual(['maya', 'priya', 'theo']);
+    });
+
+    it('a broadcast greeting stays capped', async () => {
+      script({ gate: eager(), reply: plain });
+      say('hey all of you');
+      await runTurn(actor, { triggerMessageId: 'u2', forced: [] });
+      expect(started().length).toBeLessThanOrEqual(SMALL_TALK_CAPS.greeting);
+    });
+
+    it('an unaddressed message still goes through the gates', async () => {
+      script({ gate: (id, n) => (n === 0 && id === 'priya' ? eager()(id, n) : QUIET), reply: plain });
+      say('What is our runway?');
+      await runTurn(actor, { triggerMessageId: 'u2', forced: [] });
+      expect(whoSpoke()).toEqual([['priya', 0]]);
+    });
+  });
+
+  describe('speaker order', () => {
+    it('the most novel bid starts first, without waiting for dedup', async () => {
+      let releaseDedup!: () => void;
+      hooks.delay = (m) => (m.kind === 'dedup' ? new Promise<void>((r) => (releaseDedup = r)) : undefined);
+      script({
+        gate: (id, n) => (n === 0 ? { should_respond: true, novelty: id === 'priya' ? 3 : 1, gist: `${id} take` } : QUIET),
+        reply: () => ({ chunks: ['Ok.'], delayMs: 2 }),
+        clusters: [['maya'], ['theo'], ['priya']],
+      });
+      const turn = runTurn(actor, { triggerMessageId: 'u1', forced: [] });
+      await waitFor(() => started().length === 1);
+      expect(started()[0]!.agentId).toBe('priya');
+      releaseDedup();
+      await turn;
+      expect(started()[0]!.agentId).toBe('priya');
+      expect(started().map((e) => e.agentId).slice(1)).toEqual(['maya', 'theo']);
+    });
+
+    it('a clustered bidder stays quiet when the first speaker holds its point', async () => {
+      script({
+        gate: (id, n) => (n === 0 && id !== 'priya' ? { should_respond: true, novelty: 2, gist: 'same' } : QUIET),
+        reply: () => ({ chunks: ['Ok.'], delayMs: 2 }),
+        clusters: [['maya', 'theo']],
+      });
+      await runTurn(actor, { triggerMessageId: 'u1', forced: [] });
+      expect(started().map((e) => e.agentId)).toEqual(['maya']);
+    });
+  });
+
+  describe('fallback', () => {
+    it('takes the agent who spoke least recently, briefly, with no follow-up', async () => {
+      for (const [i, id] of (['maya', 'priya'] as AgentId[]).entries()) {
+        actor.append({ type: 'message_started', messageId: `m${i}`, agentId: id, turnId: 'old', hop: 0, replyTo: 'u1', contextCutoffSeq: actor.lastSeq, effort: 'low' });
+        actor.append({ type: 'message_completed', messageId: `m${i}` });
+      }
+      script({ gate: () => QUIET, reply: () => ({ chunks: ['@Maya nope'], delayMs: 2 }) });
+      actor.append({ type: 'user_message', messageId: 'u2', clientMsgId: 'cm2', text: 'anyone free for lunch?' });
+      await runTurn(actor, { triggerMessageId: 'u2', forced: [] });
+      const fresh = started().filter((e) => e.turnId !== 'old');
+      expect(fresh.map((e) => [e.agentId, e.effort])).toEqual([['theo', 'low']]);
+      expect(String(fakeRequests.findLast((r) => r.kind === 'reply')?.prompt)).toContain('few words');
+    });
+
+    it('spreads ties across agents instead of always picking the first', async () => {
+      const picks = new Set<string>();
+      for (const text of ['anyone free?', "what's 2+2?", 'lunch?', 'nice weather', 'any ideas?', 'who knows?']) {
+        const d = openDb(':memory:');
+        const a = new ConversationActor(d, 'tie');
+        script({ gate: () => QUIET, reply: () => ({ chunks: ['Ok.'], delayMs: 1 }) });
+        a.append({ type: 'user_message', messageId: 'u', clientMsgId: 'c', text });
+        await runTurn(a, { triggerMessageId: 'u', forced: [] });
+        for (const e of a.eventsAfter(0)) if (e.type === 'message_started') picks.add(e.agentId);
+        d.close();
+      }
+      expect(picks.size).toBeGreaterThan(1);
+    });
+  });
+
+  describe('gate failures', () => {
+    it('every gate down: the agents the words point at answer at medium', async () => {
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+      setFakeScript((r): FakeReply => (r.kind === 'gate' ? { error: 'down' } : { chunks: ['Ok.'], delayMs: 1 }));
+      actor.append({ type: 'user_message', messageId: 'u2', clientMsgId: 'cm2', text: 'how is the runway looking?' });
+      await runTurn(actor, { triggerMessageId: 'u2', forced: [] });
+      expect(started().map((e) => [e.agentId, e.effort])).toEqual([['priya', 'medium']]);
+    });
+
+    it('every gate down and no hint in the words: everyone answers', async () => {
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+      setFakeScript((r): FakeReply => (r.kind === 'gate' ? { error: 'down' } : { chunks: ['Ok.'], delayMs: 1 }));
+      actor.append({ type: 'user_message', messageId: 'u2', clientMsgId: 'cm2', text: 'what do you think?' });
+      await runTurn(actor, { triggerMessageId: 'u2', forced: [] });
+      expect(started().map((e) => e.agentId).sort()).toEqual(['maya', 'priya', 'theo']);
+    });
+
+    it('a fenced or sloppy bid still counts', async () => {
+      setFakeScript((r): FakeReply =>
+        r.kind === 'gate'
+          ? {
+              chunks: [
+                r.agentId === 'theo' && !fakeRequests.some((x) => x.kind === 'reply')
+                  ? '<think>hm</think>```json\n{"should_respond": true, "novelty": 7, "gist": "renewal risk", "addresses": ["USER"], "effort": "HIGH"}\n```'
+                  : '{"should_respond": false, "novelty": 0, "gist": "", "addresses": [], "effort": "low"}',
+              ],
+              delayMs: 0,
+            }
+          : { chunks: ['Ok.'], delayMs: 1 },
+      );
+      await runTurn(actor, { triggerMessageId: 'u1', forced: [] });
+      expect(started().map((e) => [e.agentId, e.effort])).toEqual([['theo', 'high']]);
+    });
+
+    it('a hung gate only costs the others a short grace once someone answered', async () => {
+      hooks.hang = (m) => m.kind === 'gate' && m.agentId === 'theo';
+      const real = setTimeout;
+      vi.spyOn(globalThis, 'setTimeout').mockImplementation(((fn: () => void, ms?: number) =>
+        real(fn, ms === GATE_GRACE_MS ? 40 : ms)) as typeof setTimeout);
+      script({
+        gate: (id, n) => (id === 'maya' && n === 0 ? { should_respond: true, novelty: 2, gist: 'x' } : QUIET),
+        reply: () => ({ chunks: ['Done.'], delayMs: 1 }),
+      });
+      const t0 = Date.now();
+      await runTurn(actor, { triggerMessageId: 'u1', forced: [] });
+      expect(started().map((e) => e.agentId)).toEqual(['maya']);
+      expect(Date.now() - t0).toBeLessThan(GATE_TIMEOUT_MS / 2);
+    });
+
+    it('a named agent does not wait out a hung gate', async () => {
+      hooks.hang = (m) => m.kind === 'gate';
+      const real = setTimeout;
+      vi.spyOn(globalThis, 'setTimeout').mockImplementation(((fn: () => void, ms?: number) =>
+        real(fn, ms === NAMED_GATE_MS ? 20 : ms)) as typeof setTimeout);
+      script({ gate: () => QUIET, reply: () => ({ chunks: ['Hi.'], delayMs: 1 }) });
+      actor.append({ type: 'user_message', messageId: 'u2', clientMsgId: 'cm2', text: '@Theo status?' });
+      await runTurn(actor, { triggerMessageId: 'u2', forced: ['theo'] });
+      expect(started().map((e) => [e.agentId, e.effort])).toEqual([['theo', 'medium']]);
+    });
+  });
+
+  describe('effort', () => {
+    it('a named agent gets the effort and gist of its own bid', async () => {
+      script({
+        gate: () => ({ should_respond: true, novelty: 2, gist: 'full model', effort: 'high' } as GateAns),
+        reply: () => ({ chunks: ['Long.'], delayMs: 1 }),
+      });
+      actor.append({ type: 'user_message', messageId: 'u2', clientMsgId: 'cm2', text: '@Priya be exhaustive' });
+      await runTurn(actor, { triggerMessageId: 'u2', forced: ['priya'] });
+      expect(started()[0]).toMatchObject({ agentId: 'priya', effort: 'high' });
+      expect(fakeRequests.find((r) => r.kind === 'reply')?.prompt).toContain('full model');
+    });
+
+    it('a named agent whose gate would decline answers at medium, with no gist', async () => {
+      script({ gate: () => QUIET, reply: () => ({ chunks: ['Ok.'], delayMs: 1 }) });
+      actor.append({ type: 'user_message', messageId: 'u2', clientMsgId: 'cm2', text: '@Priya hello there friend' });
+      await runTurn(actor, { triggerMessageId: 'u2', forced: ['priya'] });
+      expect(started()[0]).toMatchObject({ agentId: 'priya', effort: 'medium' });
+    });
+
+    it('a teammate pulled in at a later hop answers at low', async () => {
+      script({
+        gate: (id, n) => (n === 0 && id === 'maya' ? { should_respond: true, novelty: 2, gist: 'x', effort: 'high' } as GateAns : QUIET),
+        reply: (id) => ({ chunks: [id === 'maya' ? '@Theo what is the renewal date?' : 'June.'], delayMs: 1 }),
+      });
+      await runTurn(actor, { triggerMessageId: 'u1', forced: [] });
+      expect(started().map((e) => [e.agentId, e.effort])).toEqual([
+        ['maya', 'high'],
+        ['theo', 'low'],
+      ]);
+    });
+  });
+
+  describe('thinking together', () => {
+    const say = (text: string) => {
+      actor.append({ type: 'user_message', messageId: 'u2', clientMsgId: 'cm2', text });
+    };
+    const hopsBy = () => started().map((e) => `${e.agentId}@${e.hop}`);
+    const allKeen = (_id: AgentId, n: number): GateAns =>
+      n === 0 ? { should_respond: true, novelty: 3, gist: 'view' } : QUIET;
+    const said = () => ({ chunks: ['My view.'], delayMs: 1 });
+
+    it('named debaters react to each other, then one closes', async () => {
+      script({ gate: allKeen, reply: said });
+      say('Maya and Theo, argue it out: ship SSO-lite or hold? I want you two to debate.');
+      await runTurn(actor, { triggerMessageId: 'u2', forced: ['maya', 'theo'] });
+      expect(hopsBy()).toEqual(['maya@0', 'theo@0', 'maya@1', 'theo@1', 'maya@2']);
+    });
+
+    it('a joint answer gets one reaction, then the agreed answer', async () => {
+      script({ gate: allKeen, reply: said });
+      say('Give me one single joint recommendation on SSO-lite.');
+      await runTurn(actor, { triggerMessageId: 'u2', forced: [] });
+      const replies = started();
+      expect(replies.filter((e) => e.hop === 0)).toHaveLength(3);
+      expect(replies.filter((e) => e.hop === 1)).toHaveLength(1);
+      expect(replies.filter((e) => e.hop === 2)).toHaveLength(1);
+      expect(fakeRequests.findLast((r) => r.kind === 'reply')?.prompt).toContain('joint recommendation');
+    });
+
+    it('a lone debater gets the partner the person named', async () => {
+      script({ gate: allKeen, reply: said });
+      say('Maya, debate this with Priya: hire now?');
+      await runTurn(actor, { triggerMessageId: 'u2', forced: ['maya'] });
+      expect(hopsBy()).toEqual(['maya@0', 'priya@1', 'maya@2']);
+    });
+
+    it('stop ends a debate between waves', async () => {
+      script({ gate: allKeen, reply: said });
+      say('Maya and Theo, debate it');
+      const turn = runTurn(actor, { triggerMessageId: 'u2', forced: ['maya', 'theo'] });
+      await waitFor(() => started().some((e) => e.hop === 1));
+      actor.turnAbort?.abort();
+      await turn;
+      expect(started().every((e) => e.hop <= 1)).toBe(true);
+    });
+
+    it('a real question to a teammate who answered in the same first wave brings it back', async () => {
+      script({
+        gate: allKeen,
+        reply: (id, n) => ({ chunks: [id === 'maya' && n === 0 ? '@Priya what does a slip cost us?' : 'Answer here.'], delayMs: 1 }),
+      });
+      await runTurn(actor, { triggerMessageId: 'u1', forced: [] });
+      expect(startedBy('priya').map((e) => e.hop)).toEqual([0, 1]);
+      expect(startedBy('priya')[1]!.replyTo).toBe(startedBy('maya')[0]!.messageId);
+    });
+
+    it('at hop 1 one agent from the first wave may come back; the rest wait', async () => {
+      script({
+        gate: (id, n) =>
+          n === 0
+            ? { should_respond: true, novelty: 3, gist: `${id} take` }
+            : n === 1 && id !== 'theo'
+              ? { should_respond: true, novelty: id === 'priya' ? 3 : 2, gist: `${id} adds` }
+              : QUIET,
+        reply: () => ({ chunks: ['Noted.'], delayMs: 1 }),
+      });
+      await runTurn(actor, { triggerMessageId: 'u1', forced: [] });
+      expect(started().filter((e) => e.hop === 1).map((e) => e.agentId)).toEqual(['priya']);
+    });
+
+    it('a later gist that repeats the chat stays quiet', async () => {
+      setFakeScript((r): FakeReply => {
+        if (r.kind === 'gate') {
+          const first = !fakeRequests.some((x) => x.kind === 'reply');
+          return {
+            object: {
+              should_respond: first ? r.agentId === 'priya' : r.agentId === 'theo',
+              novelty: 3,
+              gist: 'runway is 14 months',
+              addresses: [],
+              effort: 'low',
+            },
+          };
+        }
+        if (r.kind === 'dedup') return { object: { clusters: [['already_said', 'theo']] } };
+        return { chunks: ['Runway is 14 months.'], delayMs: 1 };
+      });
+      await runTurn(actor, { triggerMessageId: 'u1', forced: [] });
+      expect(started().map((e) => e.agentId)).toEqual(['priya']);
+    });
+  });
+
+  describe('steers and later waves', () => {
+    it('a forced wave skips an agent a steer just reopened', async () => {
+      let gateN = 0;
+      script({
+        gate: (id, n) => (id === 'priya' && n === 0 ? { should_respond: true, novelty: 2, gist: 'x' } : QUIET),
+        reply: (id) => ({ chunks: [id === 'priya' ? '@Maya when can it ship?' : 'Maya here.'], delayMs: 2 }),
+      });
+      actor.append({ type: 'message_started', messageId: 'old', agentId: 'maya', turnId: 'o', hop: 0, replyTo: 'u1', contextCutoffSeq: actor.lastSeq, effort: 'low' });
+      actor.append({ type: 'token_delta', messageId: 'old', segment: 0, offset: 0, text: 'Earlier.' });
+      actor.append({ type: 'message_completed', messageId: 'old' });
+      hooks.delay = (m) => {
+        // Hop 1's gate is the moment between waves; a steer reopens Maya there.
+        if (m.kind === 'gate' && started().some((e) => e.agentId === 'priya') && gateN++ === 0) {
+          reopenGeneration(actor, 'old', ['one line'], { moved: true });
+        }
+        return undefined;
+      };
+      await runTurn(actor, { triggerMessageId: 'u1', forced: [] });
+      await waitFor(() => actor.generations.size === 0);
+      expect(startedBy('maya').filter((e) => e.turnId !== 'o')).toEqual([]);
+    });
+
+    it('a mention that a steer rewrote away no longer pulls anyone in', async () => {
+      let releaseReply!: () => void;
+      const hold = new Promise<void>((r) => (releaseReply = r));
+      void hold;
+      setFakeScript((r): FakeReply => {
+        if (r.kind === 'gate')
+          return { object: { should_respond: r.agentId === 'maya' && !fakeRequests.some((x) => x.kind === 'reply'), novelty: 3, gist: 'g', addresses: [], effort: 'low' } };
+        if (r.kind === 'replace') return { chunks: ['No question after all.'], delayMs: 1 };
+        return { chunks: ['@Theo ', 'what ', 'do ', 'you ', 'think?'], delayMs: 8 };
+      });
+      releaseReply();
+      const turn = runTurn(actor, { triggerMessageId: 'u1', forced: [] });
+      await waitFor(() => actor.view.messages.some((m) => m.status === 'streaming'));
+      const g = [...actor.generations.values()][0]!;
+      await g.done;
+      reopenGeneration(actor, g.messageId, ['no questions'], { moved: true });
+      await turn;
+      expect(started().map((e) => e.agentId)).toEqual(['maya']);
+    });
   });
 
   describe('small talk', () => {

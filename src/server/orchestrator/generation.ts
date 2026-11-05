@@ -65,6 +65,8 @@ export interface StartArgs {
   effort: Effort;
   gist: string;
   othersReplying: AgentId[];
+  /** Seq of the user message this answers; lets a stop know which asks it called off. */
+  triggerSeq?: number;
 }
 
 /** One agent's streaming message, possibly re-steered into several segments. */
@@ -72,6 +74,7 @@ export class Generation {
   readonly messageId: string;
   readonly agentId: AgentId;
   readonly hop: number;
+  readonly triggerSeq: number | undefined;
   segment = 0;
   effort: Effort;
   /** For the current segment: has a non-empty chunk arrived? */
@@ -100,6 +103,7 @@ export class Generation {
       this.agentId = a.agentId;
       this.hop = a.hop;
       this.effort = a.effort;
+      this.triggerSeq = a.triggerSeq;
       this.current = newSegment(0, '');
       this.begin({
         type: 'message_started',
@@ -126,6 +130,7 @@ export class Generation {
     this.agentId = r.agentId;
     this.hop = r.hop;
     this.effort = r.effort;
+    this.triggerSeq = undefined;
     this.segment = r.segment;
     const previous = actor.view.messages.find((m) => m.id === r.messageId)?.text ?? '';
     this.current = newSegment(r.segment, '', previous);
