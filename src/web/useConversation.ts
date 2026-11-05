@@ -19,6 +19,8 @@ export interface PendingSend {
   /** Seq of the server's user_message, once the POST answered. */
   seq: number | null;
   failed: boolean;
+  /** Plain reason shown on a failed bubble. */
+  reason?: string;
 }
 
 /** Typewriter progress of one message: `shown` chars are on screen, `pos` is the (fractional) reveal credit. */
@@ -49,7 +51,7 @@ export interface ClientState {
 }
 
 /** `typing`: the agent has started its message but no words are on screen yet. */
-export type ShownMessage = MessageView & { key: string; pending: boolean; failed: boolean; typing: boolean };
+export type ShownMessage = MessageView & { key: string; pending: boolean; failed: boolean; reason?: string; typing: boolean };
 
 /**
  * A freeze is released after this long even if the server never says so.
@@ -408,11 +410,11 @@ export function ackPending(s: ClientState, clientMsgId: string, seq: number): Cl
 }
 
 /** Marks a send failed, or (failed=false) as being retried now. */
-export function failPending(s: ClientState, clientMsgId: string, failed: boolean): ClientState {
+export function failPending(s: ClientState, clientMsgId: string, failed: boolean, reason?: string): ClientState {
   return {
     ...s,
     awaiting: failed ? s.awaiting : new Map(s.awaiting).set(clientMsgId, Date.now()),
-    pendingSends: s.pendingSends.map((p) => (p.clientMsgId === clientMsgId ? { ...p, failed } : p)),
+    pendingSends: s.pendingSends.map((p) => (p.clientMsgId === clientMsgId ? { ...p, failed, reason: failed ? reason : undefined } : p)),
   };
 }
 
@@ -463,6 +465,7 @@ export function shownMessages(s: ClientState): ShownMessage[] {
       hop: 0,
       pending: true,
       failed: p.failed,
+      reason: p.reason,
       typing: false,
     });
   }
@@ -486,6 +489,24 @@ function uuid(): string {
 
 /** A POST that has not answered by now counts as failed. */
 const POST_TIMEOUT_MS = 20_000;
+/** The live connection must be down this long before the person is told. */
+const RECONNECT_NOTICE_MS = 3000;
+
+export class HttpError extends Error {
+  constructor(readonly status: number) {
+    super(`http ${status}`);
+  }
+}
+
+/** Why a send failed, in words for the person. */
+export function failureReason(err: unknown, text: string): string {
+  if (err instanceof HttpError) {
+    if (err.status === 429) return 'Too many messages, try again in a minute';
+    if (err.status === 400 && text.length > 4000) return 'Message too long';
+    return "Couldn't send this message";
+  }
+  return "Couldn't reach the server";
+}
 
 async function postJson(url: string, body: unknown): Promise<unknown> {
   const res = await fetch(url, {
@@ -494,7 +515,7 @@ async function postJson(url: string, body: unknown): Promise<unknown> {
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(POST_TIMEOUT_MS),
   });
-  if (!res.ok) throw new Error(`${url}: ${res.status}`);
+  if (!res.ok) throw new HttpError(res.status);
   return res.json();
 }
 
@@ -508,6 +529,8 @@ export interface Conversation {
   /** Stop has something to act on (see canStop). */
   canStop: boolean;
   loaded: boolean;
+  /** The live connection has been down for a few seconds. */
+  reconnecting: boolean;
 }
 
 export function useConversation(id: string): Conversation {
@@ -517,6 +540,7 @@ export function useConversation(id: string): Conversation {
   const latest = useRef<ClientState>(initialState(emptyView, { animate: !prefersReducedMotion() }));
   const [state, setState] = useState<ClientState>(latest.current);
   const [loaded, setLoaded] = useState(false);
+  const [reconnecting, setReconnecting] = useState(false);
   const frame = useRef<number | null>(null);
   const lastFrameAt = useRef<number | null>(null);
   const sendInfo = useRef(
@@ -609,6 +633,16 @@ export function useConversation(id: string): Conversation {
     let es: EventSource | null = null;
     let retryTimer: ReturnType<typeof setTimeout> | null = null;
     let backoff = 500;
+    // Only a connection lost for a few seconds is worth a word.
+    let lostTimer: ReturnType<typeof setTimeout> | null = null;
+    const lost = () => {
+      if (lostTimer === null && !disposed) lostTimer = setTimeout(() => setReconnecting(true), RECONNECT_NOTICE_MS);
+    };
+    const found = () => {
+      if (lostTimer !== null) clearTimeout(lostTimer);
+      lostTimer = null;
+      setReconnecting(false);
+    };
 
     const restart = (delay: number) => {
       es?.close();
@@ -629,6 +663,7 @@ export function useConversation(id: string): Conversation {
         update((s) => withSnapshot(s, view), true, true);
         setLoaded(true);
       } catch {
+        lost();
         restart(backoff);
         backoff = Math.min(backoff * 2, 8000);
         return;
@@ -638,6 +673,7 @@ export function useConversation(id: string): Conversation {
       es = source;
       source.onopen = () => {
         backoff = 500;
+        found();
       };
       source.onmessage = (msg: MessageEvent<string>) => {
         if (es !== source) return;
@@ -655,6 +691,7 @@ export function useConversation(id: string): Conversation {
         }
       };
       source.onerror = () => {
+        lost();
         // The browser retries on its own (with Last-Event-ID) unless it gave up.
         if (source.readyState === EventSource.CLOSED && es === source) {
           restart(backoff);
@@ -668,6 +705,7 @@ export function useConversation(id: string): Conversation {
       disposed = true;
       es?.close();
       if (retryTimer !== null) clearTimeout(retryTimer);
+      if (lostTimer !== null) clearTimeout(lostTimer);
       if (frame.current !== null) cancelAnimationFrame(frame.current);
       frame.current = null;
       lastFrameAt.current = null;
@@ -685,9 +723,10 @@ export function useConversation(id: string): Conversation {
           const r = await postJson(`${base}/messages`, { clientMsgId, ...body, sentAt: Date.now() });
           const seq = (r as { seq?: unknown }).seq;
           if (typeof seq === 'number') update((s) => ackPending(s, clientMsgId, seq));
-        } catch {
+        } catch (err) {
           // Nothing will resolve this send, so what it froze is released too.
-          update((s) => unfreeze(failPending(s, clientMsgId, true), info.froze), true);
+          const reason = failureReason(err, info.text);
+          update((s) => unfreeze(failPending(s, clientMsgId, true, reason), info.froze), true);
         }
       });
     },
@@ -750,5 +789,5 @@ export function useConversation(id: string): Conversation {
     return () => clearTimeout(t);
   }, [state, tick]);
 
-  return { messages, displayed, send, retry, stop, anyStreaming, canStop: stopNow, loaded };
+  return { messages, displayed, send, retry, stop, anyStreaming, canStop: stopNow, loaded, reconnecting };
 }

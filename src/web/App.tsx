@@ -14,13 +14,54 @@ function useStickToBottom<T extends HTMLElement>(
   useEffect(() => {
     const el = ref.current;
     if (!el) return;
+    const near = () => el.scrollHeight - el.scrollTop - el.clientHeight < 72;
+    // Leaving the bottom is the reader's doing (wheel, touch, keys); only they unpin.
+    const unpin = () => {
+      pinned.current = false;
+      setAtBottom(near());
+    };
+    let lastTop = el.scrollTop;
     const onScroll = () => {
-      const near = el.scrollHeight - el.scrollTop - el.clientHeight < 72;
-      pinned.current = near;
-      setAtBottom(near);
+      const n = near();
+      if (n) pinned.current = true;
+      else if (el.scrollTop < lastTop) pinned.current = false; // dragged up (the layout only ever scrolls down)
+      lastTop = el.scrollTop;
+      setAtBottom(n);
+    };
+    let touchY = 0;
+    const onWheel = (e: WheelEvent) => {
+      if (e.deltaY < 0) unpin();
+    };
+    const onTouchStart = (e: TouchEvent) => {
+      touchY = e.touches[0]?.clientY ?? 0;
+    };
+    const onTouchMove = (e: TouchEvent) => {
+      const y = e.touches[0]?.clientY ?? 0;
+      if (y > touchY + 2) unpin();
+      touchY = y;
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (['PageUp', 'ArrowUp', 'Home'].includes(e.key)) unpin();
     };
     el.addEventListener('scroll', onScroll, { passive: true });
-    return () => el.removeEventListener('scroll', onScroll);
+    el.addEventListener('wheel', onWheel, { passive: true });
+    el.addEventListener('touchstart', onTouchStart, { passive: true });
+    el.addEventListener('touchmove', onTouchMove, { passive: true });
+    el.addEventListener('keydown', onKey);
+    // The window or composer changing size (growing field, mobile keyboard) must not hide the latest message.
+    const ro = new ResizeObserver(() => {
+      if (pinned.current) el.scrollTop = el.scrollHeight;
+      else setAtBottom(near());
+    });
+    ro.observe(el);
+    return () => {
+      el.removeEventListener('scroll', onScroll);
+      el.removeEventListener('wheel', onWheel);
+      el.removeEventListener('touchstart', onTouchStart);
+      el.removeEventListener('touchmove', onTouchMove);
+      el.removeEventListener('keydown', onKey);
+      ro.disconnect();
+    };
   }, []);
 
   useLayoutEffect(() => {
@@ -87,7 +128,7 @@ function Welcome() {
 }
 
 export function App({ conversationId }: { conversationId: string }) {
-  const { messages, displayed, send, retry, stop, canStop, loaded } = useConversation(conversationId);
+  const { messages, displayed, send, retry, stop, canStop, loaded, reconnecting } = useConversation(conversationId);
   const composer = useRef<ComposerHandle>(null);
   const { ref: scroller, atBottom, toBottom } = useStickToBottom<HTMLDivElement>(messages);
 
@@ -131,6 +172,7 @@ export function App({ conversationId }: { conversationId: string }) {
                 first={!prev || authorKey(prev) !== who}
                 last={!next || authorKey(next) !== who}
                 failed={m.failed}
+                reason={m.reason}
                 anchor={m.pending ? undefined : m.anchorSeq}
                 typing={m.typing}
                 onRetry={m.failed ? () => retry(m.key) : undefined}
@@ -139,6 +181,11 @@ export function App({ conversationId }: { conversationId: string }) {
           })}
         </div>
       </main>
+      {reconnecting && (
+        <div className="reconnecting" role="status">
+          Reconnecting…
+        </div>
+      )}
       <div className="dock">
         {!atBottom && (
           <button type="button" className="jump" onClick={() => toBottom(true)} aria-label="Jump to latest">

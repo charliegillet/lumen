@@ -63,6 +63,7 @@ interface BubbleProps {
   first: boolean; // first of a run by the same author
   last: boolean;
   failed: boolean;
+  reason?: string;
   onRetry?: () => void;
   /** Started but no words on screen yet: show typing dots instead of text. */
   typing?: boolean;
@@ -85,7 +86,7 @@ function useArrival(anchor: number | undefined) {
   return ref;
 }
 
-export const Bubble = memo(function Bubble({ agentId, text, first, last, failed, onRetry, anchor, typing }: BubbleProps) {
+export const Bubble = memo(function Bubble({ agentId, text, first, last, failed, reason, onRetry, anchor, typing }: BubbleProps) {
   const ref = useArrival(anchor);
   if (agentId === null) {
     return (
@@ -95,7 +96,7 @@ export const Bubble = memo(function Bubble({ agentId, text, first, last, failed,
         </div>
         {failed && (
           <button type="button" className="retry" onClick={onRetry}>
-            Not delivered. <span>Tap to retry</span>
+            {reason ?? 'Not delivered'}. <span>Tap to retry</span>
           </button>
         )}
       </div>

@@ -603,3 +603,12 @@ describe('canStop', () => {
     expect(canStop(s, Date.now() + AWAIT_CAP_MS)).toBe(false); // never stuck on a lost steer_resolved
   });
 });
+
+describe('failure reasons', () => {
+  it('says why in plain words', async () => {
+    const { failureReason, HttpError } = await import('../../src/web/useConversation.js');
+    expect(failureReason(new TypeError('x'), 'hi')).toBe("Couldn't reach the server");
+    expect(failureReason(new HttpError(429), 'hi')).toBe('Too many messages, try again in a minute');
+    expect(failureReason(new HttpError(400), 'x'.repeat(4001))).toBe('Message too long');
+  });
+});

@@ -221,3 +221,39 @@ test('no mechanism words anywhere in a full scenario', async ({ page }) => {
   await expect(page.locator(BUBBLES).first()).toBeVisible();
   await expectNoMechanismWords(page);
 });
+
+test('scrolling up mid-stream stays put', async ({ page }) => {
+  await open(page);
+  await say(page, LONG);
+  await say(page, LONG + ' again');
+  await allStreaming(page);
+  const sc = page.locator('.scroller');
+  await expect.poll(() => sc.evaluate((el) => el.scrollHeight > el.clientHeight + 200)).toBe(true);
+  await sc.hover();
+  await page.mouse.wheel(0, -300);
+  await page.waitForTimeout(500); // the wheel scroll settles
+  const top = await sc.evaluate((el) => el.scrollTop);
+  await page.waitForTimeout(1200); // agents keep streaming
+  expect(await grewBetween(page, 300)).toBeGreaterThan(0);
+  expect(Math.abs((await sc.evaluate((el) => el.scrollTop)) - top)).toBeLessThan(4);
+  await expect(page.getByRole('button', { name: 'Jump to latest' })).toBeVisible();
+  await page.getByRole('button', { name: 'Jump to latest' }).click();
+  await expect.poll(() => pinnedToBottom(page)).toBe(true);
+});
+
+test('a lost connection says Reconnecting, then clears', async ({ page }) => {
+  await page.route('**/snapshot', (r) => r.abort());
+  await page.goto('/c/e2e-offline');
+  await expect(page.getByText('Reconnecting')).toBeVisible({ timeout: 10_000 });
+  await page.unroute('**/snapshot');
+  await expect(page.getByRole('heading', { name: 'Lumen team' })).toBeVisible();
+  await expect(page.getByText('Reconnecting')).toHaveCount(0, { timeout: 15_000 });
+});
+
+test('a rejected send says why on the bubble', async ({ page }) => {
+  await open(page);
+  await page.route('**/messages', (r) => r.fulfill({ status: 429, body: '{}' }));
+  await say(page, 'hello there');
+  await expect(page.getByText('Too many messages, try again in a minute')).toBeVisible();
+  await expectNoMechanismWords(page);
+});

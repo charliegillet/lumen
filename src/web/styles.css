@@ -694,3 +694,10 @@ button {
     scroll-behavior: auto !important;
   }
 }
+
+.reconnecting {
+  text-align: center;
+  font-size: 12px;
+  color: var(--text-3);
+  padding: 4px 0;
+}
