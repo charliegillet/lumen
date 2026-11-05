@@ -122,7 +122,11 @@ Then open http://localhost:8080. `run.sh` checks the Node version, installs depe
 | `npm run eval` | real-model evals; `-- --case <name>`, `-- --k <n>` |
 | `npm run spike` | time-to-first-token latency probe |
 
-Settings live in `.env` (see [.env.example](.env.example)): `OPENAI_API_KEY`, the `MODEL_*` strings below, `DB_PATH` (default `./data/chat.db`) and `PORT` (default 8080).
+Settings live in `.env` (see [.env.example](.env.example)): the API key for each provider you use (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_GENERATIVE_AI_API_KEY`), the `MODEL_*` strings below, `DB_PATH` (default `./data/chat.db`) and `PORT` (default 8080). The server checks the model strings and keys at startup and exits with a one-line reason if one is unusable (a typo, an unknown provider, a missing key); `/api/health` lists the models in use. A blank `MODEL_*=` line counts as unset. Provider calls are retried twice on 429 or 5xx before the first token, and every failed call is logged with its cause.
+
+`npm run test:e2e` needs a browser once: `npx playwright install chromium`.
+
+**Limits.** `RATE_LIMIT_PER_MIN` (default 20) caps new messages per client IP per minute; while a reply is streaming a client may send three times that, so steers and stops still get through. `MAX_MESSAGES_PER_CONV` (default 300) caps one conversation. Request bodies over 64 KB get a 413. `GATE_TIMEOUT_MS` (8000), `CLASSIFY_TIMEOUT_MS` (6000) and `STREAM_IDLE_MS` (25000) tune the model call caps for slow models. A steer applies to a just-finished message if it lands within 2 s, or if the person had started typing before the message finished.
 
 ## Model
 
@@ -135,7 +139,7 @@ MODEL_CLASSIFIER=openai:gpt-5.6-luna MODEL_AGENT_PRIYA=compat:<model>
 MODEL_JUDGE=openai:gpt-6-sol
 ```
 
-`openai:`, `anthropic:`, `google:` and `compat:` (any OpenAI-compatible endpoint via `OPENAI_COMPAT_BASE_URL`) are registered, plus `fake:` for tests. Only OpenAI was exercised against real models; the other providers are wired but untested here. Every call uses provider-neutral options (the SDK's unified `reasoning` setting, `Output.object` for structured calls, no `temperature`, no assistant prefill), and the whole test suite swaps the app onto the scripted fake through these same variables. `MODEL_JUDGE` is used only by the eval harness.
+`openai:`, `anthropic:`, `google:` and `compat:` (any OpenAI-compatible endpoint via `OPENAI_COMPAT_BASE_URL`) are registered, plus `fake:` for tests. Only OpenAI was exercised against real models; the other providers are wired but untested here. `compat:` was run against a local llama.cpp server with a 1.2B model: set `OPENAI_COMPAT_STRUCTURED=1` so structured calls (the classifier) send a JSON schema, inline `<think>` blocks are stripped, and it sends `max_tokens`, so it is not for OpenAI reasoning models (use `openai:` for those). Every call uses provider-neutral options (the SDK's unified `reasoning` setting, `Output.object` for structured calls, no `temperature`, no assistant prefill), and the whole test suite swaps the app onto the scripted fake through these same variables. `MODEL_JUDGE` is used only by the eval harness.
 
 **Why `gpt-5.6-luna`.** A latency spike (`npm run spike`, 5 runs per row) measured time to first token, because a group chat feels broken above roughly 700 ms. At the lowest reasoning level, median TTFT was about 590 ms for `gpt-5.6-luna` versus about 720 to 1050 ms for `gpt-6-luna` across two runs. `gpt-6-luna` is a one-line env swap. Variance between runs was large, so treat these numbers as indicative, not a benchmark. Details: [docs/notes/model-spike.md](docs/notes/model-spike.md).
 
