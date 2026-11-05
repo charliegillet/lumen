@@ -51,7 +51,7 @@ Key properties:
 - **Log is truth.** `fold(log) == actor.view`. A client that connects takes `snapshot` (view at `lastSeq`) then opens SSE from that seq; the server subscribes before replaying and dedupes by seq, so nothing falls in the gap. `Last-Event-ID` resumes after a drop. The client reducer throws `GapError` on a missed seq and refetches.
 - **Display order is a fold too.** Messages show in `anchorSeq` order: the seq of their start event, or of the latest `message_segment_started` with `moved: true`. Only a user steer sets `moved` (a mid-stream restart, a debounced re-restart, or the reopen of a just-finished message), so a steered answer moves to sit after the steer that redirected it, keeping its id, its bubble and, in continue mode, the text already shown. The reducer moves the message to the end of the array, which is the same thing because a segment event is always the newest. The compliance redo, stops and unsteered agents never move anything; logs written before the field existed fold exactly as before.
 - **Crash recovery.** On actor construction any message still `streaming` gets `message_aborted(server_restart)`; a rewrite that had barely started carries the text it cut as `restoreText`, so a crash never costs the answer. A user message with no `steer_resolved` is decided again when its conversation next loads (or closed quietly if it is over 5 minutes old).
-- **Who answers is the person's call.** Naming agents makes wave 0 exactly those agents; others join later only through a visible @mention. "Only X", "just you" and "nobody else" hold for the whole turn, "one of you" gets one reply, and "Everyone:" or "each of you" brings all three in. Only unaddressed messages go through the gates for who speaks. A debate or a request for one joint answer plans its later waves (react, then close).
+- **Who answers is the person's call.** Naming agents makes wave 0 exactly those agents; others join later only through a visible @mention. "Only X", "just you" and "nobody else" hold for the whole turn, "one of you" gets one reply, and "Everyone:" or "each of you" brings all three in. Only unaddressed messages go through the gates for who speaks. A message for everyone waits for whoever is still writing. If every free agent passes on a question whose words point at an agent still writing, that agent is asked once it finishes, rather than pushing a teammate to say they do not know. A debate or a request for one joint answer plans its later waves (react, then close).
 - **Latency.** With nobody writing, gates run beside the classifier instead of after it, and the strongest bid starts without waiting for dedup. An @named steer at a live agent restarts it at once and the classifier refines it afterwards; steered segments skip reasoning.
 - **Steering never waits on the model to be responsive.** The client freezes the visible text of a targeted agent locally (regex target parse) before the POST returns; the server's classifier decides what actually happens, then a `steer_resolved` event releases the freeze. The freeze also times out after 7 s (above the server's 6 s classifier cap).
 - **Typing dots and typewriter (client only).** A message gets a bubble with typing dots from its `message_started` until it shows words; agents still gating have no message and so never show dots, and a message that ends empty loses its bubble. Live `token_delta` text is revealed per animation frame at about 75 chars/s, rising with the backlog so the display stays within ~300 ms of what arrived, at word boundaries; an ended message drains in ~150 ms. Snapshots, reloads and reduced motion show text at once. A freeze stops the reveal where it is, truncations clamp it, and `rendered` counts sent with a steer or stop are the revealed lengths, so the server cuts at what the person actually saw. The reveal is pure state (`advanceReveal` in `useConversation.ts`); the server is unchanged (75 ms flush).
@@ -94,7 +94,7 @@ sequenceDiagram
   end
 ```
 
-Variants handled by the same path: `stop` appends `stop_all`, `message_aborted(user_stop)` for the targets and `asks_dropped` for what it called off; "never mind X, Y" does the same without a `stop_all` and then treats Y as a new message; "carry on" resumes a stopped answer in a `continue` segment; a continuation joins at the last finished sentence and drops anything that only restates it; a steer landing within 2 s of a finished message **reopens** it (a new segment on the same message, moved below the steer like a restart); a message with fewer than about 10 words is `replace`d rather than continued. After a steer, a one-time judge call checks the new text complied and can redo once; that redo is not a user steer, so the answer stays where it is. When one steer redirects several agents, they move in the order they were already shown.
+Variants handled by the same path: `stop` appends `stop_all`, `message_aborted(user_stop)` for the targets and `asks_dropped` for what it called off; "never mind X, Y" does the same without a `stop_all` and then treats Y as a new message; "carry on" resumes a stopped answer in a `continue` segment and appends `asks_restored`, so it and its question count again; a continuation joins at the last finished sentence and drops anything that only restates it; a steer landing within 2 s of a finished message **reopens** it (a new segment on the same message, moved below the steer like a restart); a message with fewer than about 10 words is `replace`d rather than continued, and so is one with a finished sentence on screen when the steer sets a size limit ("one sentence"), which a continuation could not meet. After a steer, a one-time judge call checks the new text complied and can redo once; that redo is not a user steer, so the answer stays where it is. When one steer redirects several agents, they move in the order they were already shown.
 
 ## Event log
 
@@ -113,6 +113,7 @@ Source: `src/shared/events.ts`. Every row also carries `seq`, `conversationId`, 
 | `steer_resolved` | `userMessageId, targets` | invisible; tells clients to release the freeze |
 | `stop_all` | `clientReqId` | stop button; idempotent on `clientReqId` |
 | `asks_dropped` | `messageIds` | marks messages the person called off; later prompts show them as dropped, so agents do not return to them |
+| `asks_restored` | `messageIds` | clears that mark when the person picks an answer back up |
 
 ## Ordering invariants
 
@@ -123,10 +124,10 @@ Checked by `tests/property/invariants.test.ts` (fast-check, random interleavings
 3. Each message has one `message_started`; segments only increase; every segment closes exactly once (completed or aborted).
 4. No `token_delta` after its segment is closed or superseded, and none after a `stop_all` that hit it.
 5. `token_delta.offset` equals the message's current text length.
-6. Every `user_message` gets exactly one later `steer_resolved`. Caveat: a process crash between the `user_message` append and its resolution leaves it unresolved, and recovery does not retry it (it only closes dangling streams); clients release their freeze after 7 s.
+6. Every `user_message` gets exactly one later `steer_resolved`. A process crash before its resolution leaves it open until its conversation next loads, when it is decided (or closed quietly if over 5 minutes old); meanwhile clients release their freeze after 7 s.
 7. Budgets hold: hops at most 3 and at most 7 agent messages per turn.
 8. When idle nothing is `streaming` and no generations are live.
-9. Recovery on restart appends only `message_aborted(server_restart)` for dangling streams.
+9. Building an actor from the log appends only `message_aborted(server_restart)` for dangling streams; deciding undecided messages comes after that, through the normal path.
 10. Display order equals messages sorted by `anchorSeq`, recomputed from the log (start seq, or the latest `moved` segment), and a `moved` segment only appears while a user message is still being decided.
 11. A stop or a restart never takes a message from text to empty once a segment has cut words from it.
 
@@ -136,7 +137,6 @@ Checked by `tests/property/invariants.test.ts` (fast-check, random interleavings
 - **Rate limits.** 20 new messages per minute per client IP (`RATE_LIMIT_PER_MIN`, with a higher allowance while a reply is streaming so steers and stops are not blocked) and 300 user messages per conversation (`MAX_MESSAGES_PER_CONV`). Retries of an already delivered message are never limited.
 - **Tabs.** Every open tab holds one SSE stream. Over HTTP/1.1 browsers allow about 6 connections per origin, so a 7th tab may stall; Fly's HTTP/2 proxy avoids this.
 - **Cut-back on reload or a second tab.** `rendered` counts describe what one tab displayed. A reload or another tab has no freeze for a steer sent elsewhere and shows all committed text, so it can briefly see text cut back, and a steer or stop sent from it cuts at the committed length.
-- **Crash during classification.** See invariant 6: the unresolved message is not retried after a restart.
 - **Rendering.** Bubbles render line breaks, `**bold**` and `@mentions`; no other markdown.
 
 ## Deployment notes

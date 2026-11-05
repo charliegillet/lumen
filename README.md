@@ -68,8 +68,8 @@ Other details:
 - **Standing instructions** ("from now on, answer in French") are log rows (`instruction_set` / `instruction_revoked`). They are rebuilt into every prompt and replay on reload like everything else.
 - **Late steers.** A steer that lands within 2 s of a finished message reopens that message, which moves below the steer.
 - **Display order.** Bubbles are ordered by their start `seq`, or by the `seq` of the user steer that moved them. Both come from the log, so a reload shows the same order.
-- **Fail-soft.** Gate, dedup, classifier and judge calls have timeouts and fallbacks. A classifier failure is treated as a plain steer to the regex targets, so the chat never blocks on a model.
-- **Crash recovery.** On start, any message still marked streaming gets `message_aborted(server_restart)`.
+- **Fail-soft.** Gate, dedup, classifier and judge calls have timeouts and fallbacks, so the chat never blocks on a model. See Known gaps for what a failed classifier does.
+- **Crash recovery.** When a conversation next loads, any message still marked streaming gets `message_aborted(server_restart)`, and a user message the crash left undecided is decided then (or closed quietly if it is over 5 minutes old).
 
 Full design, Mermaid diagrams, the event table and the invariants: [docs/architecture.md](docs/architecture.md).
 
@@ -158,9 +158,9 @@ Measured on 2026-11-04 on this repository. Invariants the tests defend, regardle
 1. `seq` is gap-free and increasing; clients see exactly the log.
 2. `fold(log)` equals the live view; snapshot plus catch-up equals the view; a fresh actor over the same database reaches the same view.
 3. Every segment closes exactly once; no token arrives after its segment is closed, superseded or stopped; offsets match the current text length.
-4. Every user message gets exactly one `steer_resolved`, unless the process dies while it is still being classified (see Known gaps).
+4. Every user message gets exactly one `steer_resolved`, including one a crash interrupted: it is decided when its conversation next loads.
 5. Hop and message budgets hold; when idle, nothing is streaming.
-6. Restart only appends `message_aborted(server_restart)` for dangling streams.
+6. Restart closes dangling streams with `message_aborted(server_restart)` and adds nothing else until undecided messages are decided.
 7. Display order is start `seq`, or the `seq` of the steer that moved a message, recomputed from the log; only user steers move messages.
 8. Private notes never appear in another agent's prompt (checked with per-persona canary strings).
 
@@ -239,9 +239,8 @@ fly deploy
 - **Time to first word** is about 2 to 3.5 s on a fresh message and about 1 s on an @named steer (measured on 2026-11-05 against `gpt-5.6-luna`, small samples on a shared key). The first is above the 700 ms that feels instant: a gate and a classifier call both run before anyone speaks. The bubble freezes at once on a steer, so that wait is less visible.
 - **Agents sometimes invent details** that are in nobody's notes (for example what "SSO-lite" includes). No eval checks for this yet.
 - **Theo sometimes reads like Maya** on scope questions; this is the main source of attribution misses.
-- **Stop races at the edges.** A targeted "@Theo stop" ends Theo's current message but does not bar him from a later wave of the same turn. A stop from a tab that is behind can still cut messages it had not received down to nothing.
+- **Stop races at the edges.** A stop from a tab that is behind can still cut messages it had not received down to nothing.
 - **A second open tab does not freeze** on the other tab's steer, so it can briefly see text cut back. A reload or a second tab also reports everything committed as seen, so a steer or stop sent from it cuts at the committed length, not at what another tab had shown.
-- **A crash while a message is being classified** leaves that message without a `steer_resolved`, and nobody answers it after the restart (recovery only closes dangling streams). The client releases its freeze after 7 s; the person has to send the message again.
 - **Client/server clock skew.** The client sends `sentAt` with each message and the server shifts `typingStartedAt` onto its own clock, and the client reports how much text it had rendered with each steer. This reduces skew in time-based decisions such as the 2 s reopen window; it does not eliminate network delay.
 - **Hidden-profile answers are not guaranteed to pool.** Agents sometimes state their own fact without connecting it to a teammate's.
 - Effort selection by the gate is untuned.
