@@ -7,3 +7,4 @@ playwright-report
 test-results
 evals/runs/
 .claude/
+demo-script.md
