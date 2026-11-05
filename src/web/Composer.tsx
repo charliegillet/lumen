@@ -67,6 +67,7 @@ export const Composer = forwardRef<ComposerHandle, Props>(function Composer({ on
     setValue('');
     setCaret(0);
     setDismissed(null);
+    area.current?.focus();
   };
 
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -146,7 +147,11 @@ export const Composer = forwardRef<ComposerHandle, Props>(function Composer({ on
         />
         <div className="actions">
           {canStop && (
-            <button type="button" className="btn btn-stop" onClick={onStop} aria-label="Stop" title="Stop (Esc)">
+            <button type="button" className="btn btn-stop" onClick={() => {
+                onStop();
+                area.current?.focus();
+              }}
+              aria-label="Stop" title="Stop (Esc)">
               <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
                 <rect x="5" y="5" width="14" height="14" rx="3" fill="currentColor" />
               </svg>
