@@ -30,9 +30,25 @@ if (usesFake) {
   setFakeScript(script);
 }
 
+const { modelProblems } = await import('./llm/registry.js');
+const problems = modelProblems();
+if (problems.length > 0) {
+  console.error(`model configuration is not usable:\n${problems.map((p) => `  - ${p}`).join('\n')}`);
+  console.error('Fix .env or the environment (see .env.example), or run ./run.sh --fake.');
+  process.exit(1);
+}
+
 const db = openDb(dbPath);
 const server = serve({ fetch: createApp(db).fetch, port }, () => {
   console.log(`listening on http://localhost:${port}`);
+});
+server.on('error', (err: NodeJS.ErrnoException) => {
+  console.error(
+    err.code === 'EADDRINUSE'
+      ? `port ${port} is already in use; stop the other process or set PORT to a free port`
+      : `server error: ${err.message}`,
+  );
+  process.exit(1);
 });
 
 function shutdown(): void {

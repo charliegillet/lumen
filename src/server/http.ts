@@ -6,6 +6,8 @@ import { streamSSE } from 'hono/streaming';
 import { bodyLimit } from 'hono/body-limit';
 import { serveStatic } from '@hono/node-server/serve-static';
 import type { Db } from './db.js';
+import { modelSpec } from './llm/registry.js';
+import { toWellFormed } from './llm/stream.js';
 import { getActor } from './actor.js';
 import { handleStop, handleUserMessage } from './steering/handle.js';
 import type { ConvEvent } from '../shared/events.js';
@@ -106,7 +108,12 @@ export function createApp(db: Db): Hono {
   const app = new Hono();
   const allowIp = rateLimiter();
 
-  app.get('/api/health', (c) => c.json({ ok: true }));
+  app.get('/api/health', (c) =>
+    c.json({
+      ok: true,
+      models: { agent: modelSpec('agent'), gate: modelSpec('gate'), classifier: modelSpec('classifier') },
+    }),
+  );
 
   app.use('/api/conv/:id/*', async (c, next) => {
     if (!CONV_ID.test(c.req.param('id') ?? '')) return c.json({ error: 'not found' }, 404);
@@ -195,7 +202,7 @@ export function createApp(db: Db): Hono {
     if (!body) return bad(c, 'invalid JSON body');
     if (typeof body.text !== 'string') return bad(c, 'text must be a string');
     // A lone surrogate would make every later provider request fail (it stays in history).
-    const text = body.text.toWellFormed().trim();
+    const text = toWellFormed(body.text).trim();
     if (text.length === 0 || !hasVisibleText(text)) return bad(c, 'text must not be empty');
     if (text.length > 4000) return bad(c, 'text must be at most 4000 chars');
     const id = clientId(body.clientMsgId, 'clientMsgId');

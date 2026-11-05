@@ -85,7 +85,7 @@ describe('snapshot + events', () => {
   it('health check returns ok', async () => {
     const res = await app.request('/api/health');
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ ok: true });
+    expect(await res.json()).toMatchObject({ ok: true, models: { agent: expect.any(String) } });
   });
 
   it('snapshot then events after has no gap or dup', async () => {
@@ -267,7 +267,7 @@ describe('request hardening', () => {
     const res = await post('/api/conv/sur/messages', msgBody({ text: 'status? \ud83d what is new' }));
     expect(res.status).toBe(200);
     const text = getActor(db, 'sur').view.messages[0]!.text;
-    expect(text.isWellFormed()).toBe(true);
+    expect(text).toBe('status? \ufffd what is new');
   });
 
   it.each(['\u200b\u200b', '\u0000', ' \u200d\ufeff\n'])('rejects text with nothing visible (%j)', async (text) => {
