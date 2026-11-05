@@ -1172,6 +1172,46 @@ describe('carrying on after a stop', () => {
   });
 });
 
+describe('size limits', () => {
+  /** Theo has finished a sentence on screen and is writing another. */
+  function theoWithSentence(): Generation {
+    setFakeScript((r): FakeReply => {
+      if (r.kind === 'reply') return { chunks: ['First point is done. ', 'Then ', 'more ', 'and ', 'more ', 'words '], delayMs: 30 };
+      if (r.kind === 'continue' || r.kind === 'replace') return { chunks: STEERED, delayMs: 5 };
+      if (r.kind === 'classify') return { object: steer(['theo']) };
+      return { object: { complies: true } };
+    });
+    return start('theo');
+  }
+
+  it('"one sentence" after a finished sentence rewrites: a continuation could not obey it', async () => {
+    const theo = theoWithSentence();
+    await waitFor(() => theo.textSoFar().includes('Then'));
+    await (await send('@Theo one sentence')).settled;
+    await idle();
+    expect(segmentsFor(theo.messageId)[0]).toMatchObject({ mode: 'replace', truncateTo: 0 });
+    expect(msg(theo.messageId)?.text).toBe(STEERED.join(''));
+  });
+
+  it('a steer with no size limit still joins at the finished sentence', async () => {
+    const theo = theoWithSentence();
+    await waitFor(() => theo.textSoFar().includes('Then'));
+    await (await send('@Theo focus on the risks')).settled;
+    await idle();
+    expect(segmentsFor(theo.messageId)[0]).toMatchObject({ mode: 'continue', truncateTo: 'First point is done. '.length });
+  });
+
+  it('a size limit merged into a pending steer rewrites too', async () => {
+    const theo = theoWithSentence();
+    await waitFor(() => theo.textSoFar().includes('Then'));
+    const a = await send('@Theo focus on the risks');
+    const b = await send('@Theo in one line');
+    await Promise.all([a.settled, b.settled]);
+    await idle();
+    expect(segmentsFor(theo.messageId).at(-1)).toMatchObject({ mode: 'replace', truncateTo: 0 });
+  });
+});
+
 describe('steers show up fast', () => {
   it('an @named steer restarts the agent before the classifier answers', async () => {
     let release!: () => void;

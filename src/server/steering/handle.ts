@@ -26,6 +26,9 @@ export const QUEUE_DRIP_MS = 8000;
 const QUEUE_DRIP_CHARS_PER_S = 20;
 /** Below this a continuation would restate the opening; a first sentence longer than this gets rewritten instead. */
 const MIN_CONTINUE_CHARS = 40;
+/** A limit a kept sentence already uses up: no continuation can make the whole message "one sentence". */
+const SIZE_LIMIT =
+  /\b(?:(?:one|a|single)\s+(?:short\s+|quick\s+)?(?:sentence|line|word)|one[- ]liner|tl;?dr|(?:a\s+)?few\s+words|(?:under|at most|max(?:imum)?(?:\s+of)?)\s+\w+\s+words)\b/i;
 
 export interface SendInput {
   clientMsgId: string;
@@ -609,7 +612,9 @@ function restartLive(actor: ConversationActor, g: Generation, apply: 'continue' 
   // The steer that got here first (the same message, refined by the classifier) is not a second steer.
   const steers = merge ? uniq([...p.steers, i.text]) : [i.text];
   const seam = merge ? { mode: apply, keep: p.keep } : seamFor(apply, g, i);
-  const mode = merge && p.mode === 'replace' ? 'replace' : seam.mode;
+  const kept = g.textSoFar().slice(0, seam.keep);
+  const tooLong = lastSentenceEnd(kept) > 0 && steers.some((x) => SIZE_LIMIT.test(x));
+  const mode = tooLong || (merge && p.mode === 'replace') ? 'replace' : seam.mode;
   const keep = mode === 'replace' ? 0 : seam.keep;
   if (!g.restart(mode, keep, steers, { moved: true })) return false;
   pending.set(g, { segment: g.segment, mode, keep, steers, startSeq: actor.lastSeq });
