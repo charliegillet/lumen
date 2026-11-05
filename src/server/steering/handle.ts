@@ -468,11 +468,21 @@ function resumeStopped(
     if (!m || m.status !== 'stopped' || m.text === '' || liveBy(actor, id) || stoppedSince(actor, id, userSeq)) continue;
     // Unnamed, only what a stop for everyone cut; named, that agent's own stopped answer.
     if (named.length === 0 && !m.dropped) continue;
+    restoreAsks(actor, m);
     reopenGeneration(actor, m.id, [i.text], { moved: true, resume: true });
     targets.push(id);
     any = true;
   }
   return any;
+}
+
+/** Picking a called-off answer back up puts it, and the question it answers, back on the table. */
+function restoreAsks(actor: ConversationActor, m: MessageView): void {
+  if (!m.dropped) return;
+  const off = actor.eventsAfter(m.startSeq).findLast((e) => e.type === 'asks_dropped' && e.messageIds.includes(m.id));
+  const ids = off?.type === 'asks_dropped' ? off.messageIds : [];
+  const asks = actor.view.messages.filter((x) => x.dropped && x.author.kind === 'user' && ids.includes(x.id));
+  actor.append({ type: 'asks_restored', messageIds: [m.id, ...asks.map((x) => x.id)] });
 }
 
 /** The person moved on: end what is being written for the old ask and everything queued behind it. */

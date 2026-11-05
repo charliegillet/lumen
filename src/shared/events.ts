@@ -37,5 +37,7 @@ export type EventBody =
   | { type: 'steer_resolved'; userMessageId: string; targets: AgentId[] } // invisible; lets clients unfreeze
   | { type: 'stop_all'; clientReqId: string }
   /** The person called these off (a stop, or moving to another topic). They stay on screen; agents must not pick them up again. */
-  | { type: 'asks_dropped'; messageIds: string[] };
+  | { type: 'asks_dropped'; messageIds: string[] }
+  /** The person picked a called-off answer back up ("carry on"), so it and its question count again. */
+  | { type: 'asks_restored'; messageIds: string[] };
 export type ConvEvent = EventBody & { seq: number; conversationId: string; at: number };

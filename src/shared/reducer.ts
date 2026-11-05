@@ -149,6 +149,15 @@ export function applyEvent(view: ConversationView, e: ConvEvent): ConversationVi
         ...base,
         messages: view.messages.map((m) => (e.messageIds.includes(m.id) ? { ...m, dropped: true as const } : m)),
       };
+    case 'asks_restored':
+      return {
+        ...base,
+        messages: view.messages.map((m) => {
+          if (!e.messageIds.includes(m.id)) return m;
+          const { dropped: _picked, ...rest } = m;
+          return rest;
+        }),
+      };
     case 'steer_resolved':
     case 'stop_all':
       return base;

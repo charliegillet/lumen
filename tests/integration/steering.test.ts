@@ -1165,6 +1165,23 @@ describe('carrying on after a stop', () => {
     expect(events().filter((e) => e.type === 'message_started')).toHaveLength(3);
   });
 
+  it('picking an answer back up also puts its question back on the table', async () => {
+    const answering = (agentId: AgentId) =>
+      startGeneration(actor, { agentId, turnId: 't1', hop: 0, replyTo: 'u1', effort: 'low', gist: 'x', othersReplying: [], triggerSeq: 1 });
+    const theo = answering('theo');
+    const maya = answering('maya');
+    await waitFor(() => theo.textSoFar().length > 0 && maya.textSoFar().length > 0);
+    handleStop(actor, { clientReqId: 's', rendered: renderedNow() });
+    expect(msg('u1')?.dropped).toBe(true);
+    await (await send('@Theo carry on')).settled;
+    await idle();
+    expect(msg('u1')?.dropped).toBeUndefined();
+    expect(msg(theo.messageId)?.dropped).toBeUndefined();
+    expect(msg(maya.messageId)?.dropped).toBe(true); // only Theo was asked to carry on
+    const prompt = JSON.stringify(steerRequests('theo')[0]?.messages);
+    expect(prompt).toContain('<msg from=\\"You\\" kind=\\"human\\">What should we build?');
+  });
+
   it('"continue" with nothing stopped is an ordinary message', async () => {
     await (await send('continue')).settled;
     await idle();
