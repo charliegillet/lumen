@@ -1,6 +1,6 @@
 # Personas, Private-Context Isolation, and Testing for a Multi-Agent LLM Group Chat
 
-Scope: (1) keeping 3+ LLM agent personas distinct and their private context isolated under adversarial pressure; (2) testing nondeterministic, concurrent, streaming multi-agent systems in a ~24h take-home. The assignment (local `assignment.md`) says evaluators "will interrupt the agents, vigorously vet it, and attempt to break it", that "ordering is defended, not hoped for", that "agents stay distinct under pressure", and that they value "deliberate scope cuts, honesty about gaps, and tests where they matter."
+Scope: (1) keeping 3+ LLM agent personas distinct and their private context isolated under adversarial pressure; (2) testing nondeterministic, concurrent, streaming multi-agent systems in a ~24h take-home. The brief expects evaluators to interrupt the agents and probe for failures, and to value defended ordering, distinct personas under pressure, and tests that matter.
 
 Labeling used below: **Cited Findings** come from the linked sources. **Inferences** are my engineering recommendations built on those findings. They are not sourced facts.
 
@@ -231,7 +231,7 @@ A small, hand-rolled LLM-judge script (about 20–40 cases, pairwise or rubric s
 Spend about 15–20% of the 24h on tests, weighted toward the claims evaluators will attack: ordering, steering, stop, reload/persistence, isolation. Make those **deterministic** with a scripted fake LLM. Add a **small real-model eval script** for persona distinctness, steering compliance, and redundancy, and report its pass rates honestly. Explicitly list what isn't tested.
 
 ### Cited Findings
-- The assignment values "tests where they matter", "ordering is defended, not hoped for", "agents stay distinct under pressure", and "honesty about gaps", and says evaluators "will interrupt the agents… and attempt to break it." — local `assignment.md` (no URL)
+- The brief rewards well-aimed tests, defended ordering, distinct personas under pressure, and honesty about gaps; evaluators are expected to interrupt the agents and try to break the system.
 - LLM testing is hard because models are "non-deterministic and calling them is slow and expensive". This is why the SDK ships mock models and simulated streams. — [AI SDK Testing docs](https://ai-sdk.dev/docs/ai-sdk-core/testing)
 - Persona drift grows with dialog length, conformity and impersonation show up in multi-agent chat, and agents underuse private info. Those are the specific behavioral risks to evaluate. — [arXiv 2402.10962](https://arxiv.org/html/2402.10962v1); [arXiv 2405.03862](https://arxiv.org/html/2405.03862v2); [arXiv 2505.11556](https://arxiv.org/html/2505.11556v2)
 
