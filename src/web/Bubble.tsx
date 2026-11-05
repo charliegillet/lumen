@@ -36,20 +36,25 @@ function withMentions(text: string, keyBase: string): ReactNode[] {
 }
 
 /**
- * Plain text with line breaks kept (via CSS), **bold** and @mentions.
- * An unclosed ** while words are still arriving is rendered bold already,
- * so the asterisks never flash on screen.
+ * Plain text with line breaks kept (via CSS) and @mentions. Agent text also gets
+ * **bold** for closed pairs with no space inside; one still open at the very end
+ * (words arriving) is bold already, so the asterisks never flash. The person's
+ * own text is never reinterpreted.
  */
-export function RichText({ text }: { text: string }) {
-  const parts = text.split('**');
-  return (
-    <>
-      {parts.map((part, i) => {
-        const nodes = withMentions(part, String(i));
-        return i % 2 === 1 ? <strong key={i}>{nodes}</strong> : <span key={i}>{nodes}</span>;
-      })}
-    </>
-  );
+const BOLD = /\*\*(?=\S)([^\n]*?\S)\*\*|\*\*(?=\S)([^\n*]*)$/g;
+
+export function RichText({ text, bold = false }: { text: string; bold?: boolean }) {
+  if (!bold) return <>{withMentions(text, 'p')}</>;
+  const out: ReactNode[] = [];
+  let last = 0;
+  for (const m of text.matchAll(BOLD)) {
+    const i = m.index;
+    if (i > last) out.push(<span key={`t${i}`}>{withMentions(text.slice(last, i), `t${i}`)}</span>);
+    out.push(<strong key={`b${i}`}>{withMentions(m[1] ?? m[2] ?? '', `b${i}`)}</strong>);
+    last = i + m[0].length;
+  }
+  if (last < text.length) out.push(<span key="end">{withMentions(text.slice(last), 'end')}</span>);
+  return <>{out}</>;
 }
 
 interface BubbleProps {
@@ -120,7 +125,7 @@ export const Bubble = memo(function Bubble({ agentId, text, first, last, failed,
           </div>
         ) : (
           <div className="bubble bubble-agent">
-            <RichText text={text} />
+            <RichText text={text} bold />
           </div>
         )}
       </div>
