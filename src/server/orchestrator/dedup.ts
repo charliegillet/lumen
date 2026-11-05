@@ -53,8 +53,47 @@ export async function clusterGists(bids: Bid[], signal: AbortSignal): Promise<Ag
     }
     for (const b of live) if (!seen.has(b.agentId)) out.push([b.agentId]);
     return out;
-  } catch {
+  } catch (err) {
+    if (!signal.aborted) console.warn('dedup failed, keeping every bid:', err instanceof Error ? err.message : err);
     return singletons();
+  }
+}
+
+/** The stand-in id for what the chat already holds; shares the clusters schema. */
+const ALREADY_SAID = 'already_said';
+
+/**
+ * Agents whose gist only repeats something already in the chat. Only later waves
+ * need this; the gist is compared with the turn's earlier messages. Any failure
+ * means no repeats.
+ */
+export async function findRepeats(bids: Bid[], said: string[], signal: AbortSignal): Promise<Set<AgentId>> {
+  const live = bids.filter((b) => b.should_respond);
+  if (live.length === 0 || said.length === 0) return new Set();
+  const prompt = [
+    'Each line starting with an agent id is the point that agent intends to make in a group chat.',
+    `Lines starting with ${ALREADY_SAID} are already in the chat.`,
+    `Group an agent with ${ALREADY_SAID} when its point adds nothing to what is already there. Agents with something new stay alone.`,
+    'Answer with only a JSON object: {"clusters": [["agentId", ...], ...]} using every agent exactly once.',
+    '',
+    ...said.map((t) => `${ALREADY_SAID}: ${t.replace(/\s+/g, ' ')}`),
+    ...live.map((b) => `${b.agentId}: ${b.gist}`),
+  ].join('\n');
+  try {
+    const { clusters } = await generateStructured({
+      role: 'gate',
+      system: 'You compare short statements and spot the ones that repeat what was already said.',
+      prompt,
+      schema: ClusterSchema,
+      signal,
+      meta: { kind: 'dedup' },
+    });
+    const dup = clusters.find((c) => c.includes(ALREADY_SAID)) ?? [];
+    const ids = new Set<string>(live.map((b) => b.agentId));
+    return new Set(dup.filter((id): id is AgentId => ids.has(id)));
+  } catch (err) {
+    if (!signal.aborted) console.warn('repeat check failed, allowing every bid:', err instanceof Error ? err.message : err);
+    return new Set();
   }
 }
 
@@ -62,7 +101,16 @@ export async function clusterGists(bids: Bid[], signal: AbortSignal): Promise<Ag
 export function selectSpeakers(
   bids: Bid[],
   clusters: AgentId[][],
-  o: { forced: AgentId[]; hop: number; excluded: AgentId[] },
+  o: {
+    forced: AgentId[];
+    hop: number;
+    excluded: AgentId[];
+    /** Already speaking: wins its cluster over anyone not forced. */
+    first?: AgentId;
+    /** Tie-breaks when nobody bid: each agent's last message seq, then a hash of `seed`. */
+    recency?: Map<AgentId, number>;
+    seed?: string;
+  },
 ): { agentId: AgentId; effort: Effort; gist: string }[] {
   const order = (id: AgentId) => AGENT_IDS.indexOf(id);
   const byId = new Map(bids.map((b) => [b.agentId, b]));
@@ -86,6 +134,7 @@ export function selectSpeakers(
     cands.sort(
       (a, b) =>
         Number(forced.has(b)) - Number(forced.has(a)) ||
+        Number(b === o.first) - Number(a === o.first) ||
         (byId.get(b)?.novelty ?? 0) - (byId.get(a)?.novelty ?? 0) ||
         order(a) - order(b),
     );
@@ -95,7 +144,15 @@ export function selectSpeakers(
 
   if (chosen.size === 0 && o.hop === 0) {
     const pool = bids.filter((b) => !excluded.has(b.agentId));
-    pool.sort((a, b) => b.novelty - a.novelty || order(a.agentId) - order(b.agentId));
+    const quiet = (id: AgentId) => o.recency?.get(id) ?? 0;
+    const roll = (id: AgentId) => (o.seed === undefined ? order(id) : hash(`${o.seed}:${id}`));
+    pool.sort(
+      (a, b) =>
+        b.novelty - a.novelty ||
+        quiet(a.agentId) - quiet(b.agentId) ||
+        roll(a.agentId) - roll(b.agentId) ||
+        order(a.agentId) - order(b.agentId),
+    );
     if (pool[0]) chosen.add(pool[0].agentId);
   }
 
@@ -105,4 +162,14 @@ export function selectSpeakers(
       const b = byId.get(id);
       return { agentId: id, effort: b?.effort ?? 'medium', gist: b?.gist ?? '' };
     });
+}
+
+/** FNV-1a. Only needs to spread ties around, not be strong. */
+function hash(s: string): number {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return h >>> 0;
 }
