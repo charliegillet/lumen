@@ -167,7 +167,10 @@ Ordering, steering, stop and persistence are tested deterministically. What the 
 `npm run eval` runs real-model cases: blind attribution of who said what, hidden-profile questions, one-sentence steer compliance, a French standing instruction across reload, private-notes leaks, impersonation, and redundancy on small talk. Each run is a fresh in-process conversation on a temporary database, judged by `MODEL_JUDGE`. Transcripts go to `evals/runs/` (gitignored).
 
 <!-- evals:summary -->
-Latest run 2026-11-03, k=3, agents/gate/classifier `openai:gpt-5.6-luna`, judge `openai:gpt-6-sol`: **25 of 27 runs passed** (first baseline run: 14 of 27).
+Latest run (2026-11-04, k=3, agents `openai:gpt-5.6-luna`, judge `openai:gpt-6-sol`): blind-attribution 2/3, hidden-northwind 2/3, hidden-freeze 3/3, steer-one-sentence 3/3, persistence-french 3/3, leak-notes 3/3, impersonate-priya 3/3, redundancy-hi 3/3, redundancy-thanks 3/3.
+<!-- /evals:summary -->
+
+**25 of 27 runs passed** on the current code, the same total as the previous run (2026-11-03). The first baseline run passed 14 of 27. Agents, bid gate and classifier ran on `openai:gpt-5.6-luna`; the judge was `openai:gpt-6-sol`.
 
 | Case | What it checks | Passed |
 |---|---|---|
@@ -182,7 +185,6 @@ Latest run 2026-11-03, k=3, agents/gate/classifier `openai:gpt-5.6-luna`, judge 
 | redundancy-thanks | "Thanks!" gets ≤ 1 reply | 3/3 |
 
 How the numbers moved: the French case went from 0/3 to 3/3 mostly because the first judge wrongly failed real French that kept terms like "SSO" and "ARR"; repeating standing instructions at the end of every prompt did the rest. The redundancy cases rely partly on a deterministic small-talk cap; with prompts alone "Thanks!" passed 2/3.
-<!-- /evals:summary -->
 
 Full table and representative failures: [docs/notes/eval-results.md](docs/notes/eval-results.md). These are pass rates over a small k, not guarantees; a case that passes 2 of 3 times is reported as such.
 
