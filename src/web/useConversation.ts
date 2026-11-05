@@ -285,8 +285,13 @@ export function onEvent(s: ClientState, e: ConvEvent): ClientState {
       if (!s.pendingSends.some((p) => p.clientMsgId === e.clientMsgId)) return next;
       return { ...next, pendingSends: s.pendingSends.filter((p) => p.clientMsgId !== e.clientMsgId) };
     case 'steer_resolved': {
+      // Targets stay frozen for their segment event, unless they already ended: nothing more is coming for them.
       const ids = view.messages
-        .filter((m) => s.frozen.has(m.id) && !(m.author.kind === 'agent' && e.targets.includes(m.author.agentId)))
+        .filter(
+          (m) =>
+            s.frozen.has(m.id) &&
+            (m.status !== 'streaming' || !(m.author.kind === 'agent' && e.targets.includes(m.author.agentId))),
+        )
         .map((m) => m.id);
       const u = view.messages.find((m) => m.id === e.userMessageId);
       const own = u?.clientMsgId !== undefined && s.awaiting.has(u.clientMsgId);
@@ -337,14 +342,18 @@ export function onEvent(s: ClientState, e: ConvEvent): ClientState {
       if (s.held.has(e.messageId) && shownLength(next, m) > 0) return { ...next, held: without(s.held, e.messageId) };
       return next;
     }
-    case 'message_completed':
+    case 'message_completed': {
       // The typewriter (if any) finishes on its own, quickly; held words stay until it shows something.
+      // A freeze set by a send still being decided survives completion: the rest of
+      // the old answer must not appear, and the steer's segment or resolution releases it.
+      const holdFreeze = s.frozen.has(e.messageId) && [...s.awaiting.keys()].some((id) => !failedSend(s, id));
       return {
         ...next,
-        frozen: without(s.frozen, e.messageId),
+        frozen: holdFreeze ? s.frozen : without(s.frozen, e.messageId),
         held: keepHeld(s, view, e.messageId) ? s.held : without(s.held, e.messageId),
         lastWorkAt: Date.now(),
       };
+    }
     case 'message_aborted': {
       const reveal = clampReveal(s.reveal, e.messageId, e.truncateTo);
       return {
@@ -357,7 +366,13 @@ export function onEvent(s: ClientState, e: ConvEvent): ClientState {
     case 'stop_all':
       // The aborts that follow carry the final text; hold everything until they land.
       // Sends before it are stopped too, so they no longer count as pending work.
-      return freezeAll({ ...next, awaiting: new Map(), lastWorkAt: null, lastStopSeq: e.seq });
+      return freezeAll({
+        ...next,
+        frozen: new Map([...s.frozen].filter(([id]) => view.messages.find((m) => m.id === id)?.status === 'streaming')),
+        awaiting: new Map(),
+        lastWorkAt: null,
+        lastStopSeq: e.seq,
+      });
     default:
       return next;
   }

@@ -400,6 +400,24 @@ describe('client conversation state', () => {
     expect(shown(s, 'B')).toBe('Theo');
   });
 
+  it('a steer freezes the bubble through completion: the old rest never shows', () => {
+    let s = freezeFor(addPending(twoStreaming(), 'cmS', '@Maya shorter'), '@Maya shorter');
+    // The server finishes inside the classifier window.
+    s = apply(s, delta(6, 'A', ' the long rest of the old answer'), completed(7, 'A'), user(8, 'S', 'cmS', '@Maya shorter'));
+    expect(s.frozen.get('A')).toBe('Maya says'.length);
+    expect(shown(s, 'A')).toBe('Maya says');
+    // Continue: the bubble moves below the steer and keeps the kept text.
+    const cont = apply(s, segStart(9, 'A', 1, 'Maya says'.length, 'continue', true));
+    expect(shown(cont, 'A')).toBe('Maya says');
+    expect(cont.frozen.has('A')).toBe(false);
+    // Replace: the frozen partial is held, not the completed text.
+    const rep = apply(s, segStart(9, 'A', 1, 0, 'replace', true));
+    expect(shown(rep, 'A')).toBe('Maya says');
+    // No segment at all: resolution releases it.
+    const none = apply(s, resolved(9, 'S', ['maya']));
+    expect(none.frozen.has('A')).toBe(false);
+  });
+
   it('stop_all freezes whatever is still streaming until the aborts land', () => {
     let s = twoStreaming();
     s = apply(s, ev(6, { type: 'stop_all', clientReqId: 'r1' }), delta(7, 'A', ' late'));
