@@ -10,7 +10,7 @@ Maya, Theo and Priya answer side by side, can be redirected by name while they a
 [![Ordering: defended](https://img.shields.io/badge/Ordering-defended-003B57?style=for-the-badge)](#quality)
 [![Live demo](https://img.shields.io/badge/Live%20demo-lumen--group--chat.fly.dev-7B3BE2?style=for-the-badge&logo=flydotio&logoColor=white)](https://lumen-group-chat.fly.dev)
 
-[![Tests](https://img.shields.io/badge/tests-566%20passing-2EA44F?style=flat-square)](#quality)
+[![Tests](https://img.shields.io/badge/tests-617%20passing-2EA44F?style=flat-square)](#quality)
 [![E2E](https://img.shields.io/badge/e2e-12%20passing-2EA44F?style=flat-square)](#quality)
 [![Property runs](https://img.shields.io/badge/property%20runs-100%2Frun%20%C2%B7%201k%20explored-2EA44F?style=flat-square)](#quality)
 [![Typecheck](https://img.shields.io/badge/tsc%20strict-clean-2EA44F?style=flat-square)](#quality)
