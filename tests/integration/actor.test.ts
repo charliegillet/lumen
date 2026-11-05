@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openDb, type Db } from '../../src/server/db.js';
-import { ConversationActor, getActor } from '../../src/server/actor.js';
+import { ConversationActor, MAX_IDLE_ACTORS, actorCount, getActor } from '../../src/server/actor.js';
 import { applyEvent, fold } from '../../src/shared/reducer.js';
 import type { ConvEvent, EventBody } from '../../src/shared/events.js';
 
@@ -163,5 +163,45 @@ describe('ConversationActor', () => {
     expect(second).toEqual([1, 2, 3]);
     expect(a.lastSeq).toBe(3);
     expect(a.view.lastSeq).toBe(3);
+  });
+});
+
+describe('actors in memory', () => {
+  it('stays bounded under reads of unseen conversations', () => {
+    const d = openDb(':memory:');
+    for (let i = 0; i < MAX_IDLE_ACTORS + 50; i++) getActor(d, `c${i}`);
+    expect(actorCount(d)).toBe(MAX_IDLE_ACTORS);
+    d.close();
+  });
+
+  it('never evicts one that is in use, and an evicted one reloads from the log', () => {
+    const d = openDb(':memory:');
+    const held = getActor(d, 'held');
+    const release = held.hold();
+    const watched = getActor(d, 'watched');
+    const stop = watched.subscribe(() => {});
+    const quiet = getActor(d, 'quiet');
+    quiet.append({ type: 'user_message', messageId: 'u', clientMsgId: 'c', text: 'hi' });
+    quiet.append({ type: 'steer_resolved', userMessageId: 'u', targets: [] });
+    for (let i = 0; i < MAX_IDLE_ACTORS + 10; i++) getActor(d, `c${i}`);
+    expect(getActor(d, 'held')).toBe(held);
+    expect(getActor(d, 'watched')).toBe(watched);
+    const back = getActor(d, 'quiet');
+    expect(back).not.toBe(quiet);
+    expect(back.view).toEqual(quiet.view);
+    release();
+    stop();
+    d.close();
+  });
+
+  it('a recently used conversation outlives an older one', () => {
+    const d = openDb(':memory:');
+    const a = getActor(d, 'a');
+    const b = getActor(d, 'b');
+    getActor(d, 'a');
+    for (let i = 0; i < MAX_IDLE_ACTORS - 1; i++) getActor(d, `c${i}`);
+    expect(getActor(d, 'a')).toBe(a);
+    expect(getActor(d, 'b')).not.toBe(b);
+    d.close();
   });
 });
