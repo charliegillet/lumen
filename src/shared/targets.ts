@@ -158,6 +158,15 @@ export function parseAddressing(text: string): Addressing {
 /** Who an agent's own message pulls in: @mentions and a leading address. No wording that only a person's request carries. */
 export const parseMentions = (text: string): TargetAgentId[] => scan(text, false).targets;
 
+/**
+ * Does a new message go to the whole group? "@Maya @Theo @Priya, one from each of you" names
+ * who answers and "each of you" only says how, so names win unless the message opens on the group.
+ */
+export function asksWholeGroup(text: string): boolean {
+  const { targets, broadcast } = parseTargets(text);
+  return broadcast && (targets.length === 0 || BROADCAST_LEAD.test(text.trim().replace(FILLER, '')));
+}
+
 export function parseTargets(text: string): RegexTargets {
   return scan(text, true);
 }

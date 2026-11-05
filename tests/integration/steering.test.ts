@@ -181,6 +181,12 @@ const steerRequests = (id: AgentId) =>
 const idle = () => waitFor(() => actor.generations.size === 0, 5000);
 
 describe('handleUserMessage: steering', () => {
+  it('names win over "each of you": every named agent answers though no gate would', async () => {
+    const { settled } = await send('@Maya @Theo @Priya quick gut check from each of you: do we take it on?');
+    await settled;
+    for (const id of ['maya', 'theo', 'priya'] as const) expect(startedBy(id)).toHaveLength(1);
+  });
+
   it('steer one by name, others continue', async () => {
     const g = startAll();
     await waitFor(() => g.theo.textSoFar().length > 0);

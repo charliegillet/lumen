@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { dropsTopic, parseAddressing, parseMentions, parseResume, parseTargets } from '../../src/shared/targets.js';
+import { asksWholeGroup, dropsTopic, parseAddressing, parseMentions, parseResume, parseTargets } from '../../src/shared/targets.js';
 
 describe('parseTargets', () => {
   it.each([
@@ -191,5 +191,19 @@ describe('resume and topic drops', () => {
     ['What is our runway?', false],
   ])('%s drops the topic: %s', (text, drops) => {
     expect(dropsTopic(text)).toBe(drops);
+  });
+});
+
+describe('asksWholeGroup', () => {
+  it.each([
+    ['everyone, what do you think?', true],
+    ['What does each of you think?', true],
+    ['Everyone, @Maya has a point. Thoughts?', true],
+    ['@Maya @Theo @Priya quick gut check from each of you: do we take it on?', false],
+    ['Maya and Theo, what do you guys think?', false],
+    ['@Theo what is the status', false],
+    ['what is the status', false],
+  ])('%j -> %s', (text, want) => {
+    expect(asksWholeGroup(text)).toBe(want);
   });
 });

@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import type { AgentId } from '../../shared/events.js';
 import type { MessageView } from '../../shared/reducer.js';
-import { dropsTopic, parseAddressing, parseResume, parseTargets } from '../../shared/targets.js';
+import { asksWholeGroup, dropsTopic, parseAddressing, parseResume, parseTargets } from '../../shared/targets.js';
 import { setActorLoader, type ConversationActor } from '../actor.js';
 import { AGENT_IDS } from '../agents/personas.js';
 import { generateStructured } from '../llm/stream.js';
@@ -202,6 +202,7 @@ async function handle(
 ): Promise<void> {
   const liveAtSend = [...actor.generations.values()];
   const regex = parseTargets(i.text);
+  const toGroup = asksWholeGroup(i.text);
   const targets: AgentId[] = [];
   const waits: Promise<unknown>[] = [];
   const earlier = [...decisions(actor).values()];
@@ -248,7 +249,7 @@ async function handle(
       !regex.stop &&
       liveAtSend.length === 0 &&
       !AGENT_IDS.some((id) => justFinished(latestBy(actor, id), i.typingStartedAt, sentAt));
-    if (quiet || dropTopic) prefetch = startPrefetch(actor, regex.broadcast ? [] : regex.targets, userSeq);
+    if (quiet || dropTopic) prefetch = startPrefetch(actor, toGroup ? [] : regex.targets, userSeq);
 
     // 6. Classify against what the person could see.
     let d = await classify(actor, i, liveAtSend, Date.now());
@@ -312,8 +313,8 @@ async function handle(
     //    still writing, wait for them, then take a turn. A named agent that
     //    already started a message after this one (gated in while we
     //    classified) is answering it already and is not forced again.
-    const named0 = regex.broadcast ? [] : regex.targets.filter((id) => !fast.has(id));
-    if (regex.targets.length > 0 && !regex.broadcast && named0.length === 0) return; // all steered above
+    const named0 = toGroup ? [] : regex.targets.filter((id) => !fast.has(id));
+    if (regex.targets.length > 0 && !toGroup && named0.length === 0) return; // all steered above
     const forced = named0.filter((id) => !startedAfter(actor, id, userSeq));
     if (named0.length > 0 && forced.length === 0) return;
     const live = [...actor.generations.values()];
@@ -324,7 +325,7 @@ async function handle(
       forced.length > 0 || owedByAll ? busy.length > 0 : AGENT_IDS.every((id) => live.some((g) => g.agentId === id));
     // Setting or lifting an instruction is not a question: one short nod, unless it asks something too.
     const ack =
-      (d.scope === 'standing' || d.revokes.length > 0) && !regex.broadcast && !i.text.includes('?');
+      (d.scope === 'standing' || d.revokes.length > 0) && !toGroup && !i.text.includes('?');
     const bids = takePrefetch();
     then = async () => {
       if (mustWait) await waitBehind(busy);
