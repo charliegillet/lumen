@@ -37,6 +37,14 @@ beforeEach(() => {
 });
 afterEach(() => db.close());
 
+describe('HEAD /events', () => {
+  it('leaves no subscriber behind', async () => {
+    const res = await app.request('/api/conv/headcheck/events', { method: 'HEAD' });
+    expect(res.status).toBe(200);
+    expect(getActor(db, 'headcheck').isIdle()).toBe(true);
+  });
+});
+
 interface Frame {
   id?: string;
   data?: string;

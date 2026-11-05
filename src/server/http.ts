@@ -131,6 +131,9 @@ export function createApp(db: Db): Hono {
     // A stale id beyond the log (e.g. after a DB reset) would dedupe every new event away.
     const after = Math.min(/^\d+$/.test(raw) ? Number(raw) : 0, actor.lastSeq);
 
+    // A HEAD has no body to stream, so it must not leave a subscriber behind.
+    if (c.req.method === 'HEAD') return c.body(null);
+
     c.header('X-Accel-Buffering', 'no');
     c.header('Cache-Control', 'no-cache');
     return streamSSE(c, async (stream) => {
