@@ -15,7 +15,7 @@ export const REWRITE_WINDOW_MS = 2000;
 /** Finished messages the classifier is shown as context. */
 export const RECENT_MS = 10_000;
 /** Caps on the classifier and judge calls; on timeout each falls back like a failure. */
-export const CLASSIFY_TIMEOUT_MS = 6000;
+export const CLASSIFY_TIMEOUT_MS = Number(process.env.CLASSIFY_TIMEOUT_MS) || 6000;
 export const JUDGE_TIMEOUT_MS = 8000;
 
 export interface SendInput {

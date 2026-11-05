@@ -10,7 +10,7 @@ import { startGeneration, type Generation } from './generation.js';
 
 export const BUDGET = { maxAgentMessages: 7, maxHops: 3, turnTimeoutMs: 90_000 };
 /** Per-call cap on one gate or dedup request, so one hung call cannot stall a wave. */
-export const GATE_TIMEOUT_MS = 8000;
+export const GATE_TIMEOUT_MS = Number(process.env.GATE_TIMEOUT_MS) || 8000;
 /** Most agents that answer a phatic user message; the turn ends after wave 0. */
 export const SMALL_TALK_CAPS = { greeting: 2, thanks: 1, ack: 1 } as const;
 
