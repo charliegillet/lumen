@@ -336,8 +336,16 @@ describe('runTurn', () => {
     });
 
     it('timeout launches no new wave', async () => {
+      // The clock jumps past the budget once the first wave has started, so the
+      // result does not depend on how fast the machine is.
       const saved = BUDGET.turnTimeoutMs;
-      BUDGET.turnTimeoutMs = 60;
+      BUDGET.turnTimeoutMs = 1000;
+      let skew = 0;
+      const realNow = Date.now.bind(Date);
+      vi.spyOn(Date, 'now').mockImplementation(() => realNow() + skew);
+      const off = actor.subscribe((e) => {
+        if (e.type === 'message_started') skew = 60_000;
+      });
       try {
         script({
           gate: (id, n) => (n === 0 && id === 'maya' ? { should_respond: true, novelty: 3, gist: 'x' } : QUIET),
@@ -346,6 +354,7 @@ describe('runTurn', () => {
         await runTurn(actor, { triggerMessageId: 'u1', forced: [] });
         expect(started().map((e) => e.agentId)).toEqual(['maya']);
       } finally {
+        off();
         BUDGET.turnTimeoutMs = saved;
       }
     });
