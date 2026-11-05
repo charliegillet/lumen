@@ -376,6 +376,14 @@ describe('buildPrompt', () => {
     for (const e of Object.values(EFFORT)) expect(p.system).not.toContain(e.lengthHint);
   });
 
+  it('a later gate counts joining up what teammates said, a first gate has nothing to join', () => {
+    const log = fixture();
+    const at = (hop: number) => textOf(last(buildPrompt('theo', log.events, log.seq, { kind: 'gate', hop }).messages));
+    expect(at(1)).toContain('put together');
+    expect(at(0)).not.toContain('put together');
+    expect(at(2)).not.toContain('put together');
+  });
+
   it('final turn ends with identity reminder', () => {
     const log = fixture();
     for (const id of AGENT_IDS) {

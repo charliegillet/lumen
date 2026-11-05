@@ -193,6 +193,11 @@ function finalBlock(p: Persona, mode: PromptMode): string {
     case 'gate':
       return [
         `Decide whether you, ${p.name}, should post a message now. A message that @mentions or names specific teammates is for them: stay quiet unless you were named, or you hold a new fact in your own domain that bears on it. Respond only if you were addressed, you hold a fact not yet said in the chat that bears directly on what the person asked, or you disagree with something said. Never bring up a topic nobody asked about. A greeting, thanks or small talk from the person needs at most one short reply from the whole group and no follow-up: if any teammate has replied since, stay quiet. Agreement or thanks alone never counts. Stay quiet if you would only say you do not know, defer, or ask a teammate what they are answering. You are ${mode.hop} replies deep; deeper means reply only if essential.`,
+        ...(mode.hop === 1
+          ? [
+              `Also respond if two or more teammates have each answered only part of the person's question, the real answer needs their facts put together, and nobody has said what follows yet. Then your gist is that conclusion, naming whose facts it rests on, with novelty 3. A question one message already answers does not count, and neither does restating a fact or adding a related risk.`,
+            ]
+          : []),
         `Who is in the chat:\n${publicRoster()}`,
         'Answer with only a JSON object with these fields:',
         '- should_respond: boolean',
