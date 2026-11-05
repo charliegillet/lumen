@@ -34,6 +34,9 @@ const metaHeaders = (m: ReqMeta): Record<string, string> => ({
   ...(m.agentId ? { 'x-agent-id': m.agentId } : {}),
 });
 
+/** Provider retries (429, 5xx, network) before the first token, with backoff that honours retry-after. */
+const RETRIES = 2;
+
 /** A stream with no part for this long is treated as hung. */
 export const STREAM_IDLE_MS = 25_000;
 /** No stream may run longer than this in total. */
@@ -91,12 +94,12 @@ export async function* streamChat(a: {
   const result = streamText({
     model: modelFor(a.role, a.agentId),
     system: a.system,
-    messages: a.messages,
+    messages: wellFormed(a.messages),
     abortSignal: AbortSignal.any([a.signal, timeout.signal]),
     ...(reasoning ? { reasoning } : {}),
     maxOutputTokens: e.maxOutputTokens,
     headers: metaHeaders(a.meta),
-    maxRetries: 0,
+    maxRetries: RETRIES,
     onError: () => {}, // errors surface through fullStream below
   });
   // A caller's abort always wins over a timeout that fired at the same moment.
@@ -115,6 +118,7 @@ export async function* streamChat(a: {
     }
   } catch (err) {
     check();
+    logFailure(a.meta, modelSpec(a.role, a.agentId), err);
     throw err;
   } finally {
     clearTimeout(idle);
@@ -139,7 +143,7 @@ export async function generateStructured<T>(a: {
   signal?: AbortSignal;
   meta: ReqMeta;
 } & ({ prompt: string; messages?: undefined } | { messages: ModelMessage[]; prompt?: undefined })): Promise<T> {
-  const input = a.messages ? { messages: a.messages } : { prompt: a.prompt as string };
+  const input = a.messages ? { messages: wellFormed(a.messages) } : { prompt: a.prompt as string };
   const spec = modelSpec(a.role, a.meta.agentId);
   const reasoning = FAST_KINDS.has(a.meta.kind) ? reasoningFor(spec, 'none') : undefined;
   const t0 = performance.now();
@@ -153,13 +157,41 @@ export async function generateStructured<T>(a: {
       abortSignal: a.signal,
       ...(reasoning ? { reasoning } : {}),
       headers: metaHeaders(a.meta),
-      maxRetries: 0,
+      maxRetries: RETRIES,
     });
     ok = true;
     return output as T;
+  } catch (err) {
+    if (!a.signal?.aborted) logFailure(a.meta, spec, err);
+    throw err;
   } finally {
     if (a.meta.kind === 'classify') logLatency(spec, t0, ok);
   }
+}
+
+const LONE_SURROGATE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g;
+/** Replaces lone UTF-16 surrogates with U+FFFD (String.prototype.toWellFormed, which the TS lib here lacks). */
+export const toWellFormed = (t: string): string => t.replace(LONE_SURROGATE, '\ufffd');
+
+/** A lone surrogate in history makes the provider reject every request ("failed to parse JSON"), so fix it here too. */
+export function wellFormed(messages: ModelMessage[]): ModelMessage[] {
+  return messages.map((m) => {
+    if (typeof m.content === 'string') return { ...m, content: toWellFormed(m.content) } as ModelMessage;
+    return {
+      ...m,
+      content: (m.content as { type: string; text?: string }[]).map((p) =>
+        p.type === 'text' && typeof p.text === 'string' ? { ...p, text: toWellFormed(p.text) } : p,
+      ),
+    } as ModelMessage;
+  });
+}
+
+/** Say why a model call failed; callers fall back silently otherwise. Silent under tests. */
+function logFailure(meta: ReqMeta, spec: string, err: unknown): void {
+  if (process.env.NODE_ENV === 'test' || process.env.VITEST) return;
+  const e = err as { name?: string; message?: string; statusCode?: number; cause?: { message?: string } };
+  const why = [e?.name, e?.statusCode, e?.message ?? String(err), e?.cause?.message].filter(Boolean).join(' ');
+  console.warn(`model call failed kind=${meta.kind}${meta.agentId ? ` agent=${meta.agentId}` : ''} model=${spec}: ${why}`);
 }
 
 /** One line per classify call, like the ttft log; silent under tests. */

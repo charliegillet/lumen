@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
-import { modelFor, modelSpec } from '../../src/server/llm/registry.js';
-import { generateStructured, reasoningFor, streamChat } from '../../src/server/llm/stream.js';
+import { modelFor, modelProblems, modelSpec } from '../../src/server/llm/registry.js';
+import { generateStructured, reasoningFor, streamChat, toWellFormed, wellFormed } from '../../src/server/llm/stream.js';
 import { fakeRequests, resetFake, setFakeScript } from '../../src/server/llm/fake.js';
 
 const ENV = ['MODEL_AGENT', 'MODEL_AGENT_MAYA', 'MODEL_GATE', 'MODEL_CLASSIFIER', 'MODEL_JUDGE', 'MODEL_REASONING'];
@@ -187,5 +187,93 @@ describe('structured call reasoning', () => {
     expect(info).toHaveBeenCalledTimes(1);
     expect(info.mock.calls[0]?.[0]).toMatch(/^classify model=fake:x ok=true ms=\d+$/);
     info.mockRestore();
+  });
+});
+
+describe('model configuration', () => {
+  const KEYS = ['OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'GOOGLE_GENERATIVE_AI_API_KEY', 'OPENAI_COMPAT_BASE_URL'];
+  const saved = Object.fromEntries(KEYS.map((k) => [k, process.env[k]]));
+  afterEach(() => {
+    for (const k of KEYS) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+  });
+
+  it('treats a blank override as unset', () => {
+    process.env.MODEL_AGENT_MAYA = '';
+    process.env.MODEL_GATE = '';
+    expect(modelSpec('agent', 'maya')).toBe('openai:gpt-5.6-luna');
+    expect(modelSpec('gate')).toBe('openai:gpt-5.6-luna');
+  });
+
+  it('reports bad specs and missing keys, and nothing for a good setup', () => {
+    for (const k of KEYS) delete process.env[k];
+    expect(modelProblems().join('\n')).toMatch(/OPENAI_API_KEY/);
+    process.env.OPENAI_API_KEY = 'k';
+    expect(modelProblems()).toEqual([]);
+    process.env.MODEL_AGENT = 'nonsense';
+    process.env.MODEL_GATE = 'anthropic:x';
+    process.env.MODEL_CLASSIFIER = 'compat:x';
+    const msg = modelProblems().join('\n');
+    expect(msg).toMatch(/agent maya: "nonsense" is not a provider:model/);
+    expect(msg).toMatch(/gate: .*ANTHROPIC_API_KEY/);
+    expect(msg).toMatch(/classifier: .*OPENAI_COMPAT_BASE_URL/);
+    process.env.MODEL_AGENT = 'fake:x';
+    process.env.MODEL_GATE = 'fake:x';
+    process.env.MODEL_CLASSIFIER = 'fake:x';
+    expect(modelProblems()).toEqual([]);
+  });
+
+  it('wellFormed replaces lone surrogates in string and part content', () => {
+    const out = wellFormed([
+      { role: 'user', content: 'a \ud83d b' },
+      { role: 'assistant', content: [{ type: 'text', text: 'c \ude00 d' }] },
+    ]);
+    expect(out[0]!.content).toBe('a \ufffd b');
+    expect((out[1]!.content as { text: string }[])[0]!.text).toBe('c \ufffd d');
+    expect(toWellFormed('ok \ud83d\ude00 \ud83d')).toBe('ok \ud83d\ude00 \ufffd');
+  });
+});
+
+describe('compat provider over HTTP', () => {
+  const real = globalThis.fetch;
+  afterEach(() => {
+    globalThis.fetch = real;
+    delete process.env.OPENAI_COMPAT_BASE_URL;
+    delete process.env.OPENAI_COMPAT_STRUCTURED;
+  });
+  const reply = (content: string) =>
+    new Response(
+      JSON.stringify({
+        id: 'x',
+        created: 1,
+        model: 'm',
+        choices: [{ index: 0, message: { role: 'assistant', content }, finish_reason: 'stop' }],
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+      }),
+      { status: 200, headers: { 'content-type': 'application/json' } },
+    );
+
+  it('retries a 429, sends the schema when OPENAI_COMPAT_STRUCTURED=1, and strips <think>', async () => {
+    process.env.OPENAI_COMPAT_BASE_URL = 'http://compat.test/v1';
+    process.env.OPENAI_COMPAT_STRUCTURED = '1';
+    process.env.MODEL_CLASSIFIER = 'compat:m';
+    const bodies: string[] = [];
+    globalThis.fetch = (async (_u: unknown, init?: RequestInit) => {
+      bodies.push(String(init?.body));
+      if (bodies.length === 1) return new Response('slow down', { status: 429, headers: { 'retry-after-ms': '1' } });
+      return reply('<think>hmm</think>{"ok":true}');
+    }) as typeof fetch;
+    const out = await generateStructured({
+      role: 'classifier',
+      system: 's',
+      prompt: 'p',
+      schema: z.object({ ok: z.boolean() }),
+      meta: { kind: 'classify' },
+    });
+    expect(out).toEqual({ ok: true });
+    expect(bodies).toHaveLength(2);
+    expect(bodies[1]).toMatch(/json_schema/);
   });
 });
