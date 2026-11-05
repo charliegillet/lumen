@@ -143,7 +143,7 @@ MODEL_JUDGE=openai:gpt-6-sol
 
 | Check | Result |
 |---|---|
-| `npm test`: unit (170), integration (151) and property (1 suite), all against a scripted fake LLM so races are reproducible | **322 passed** in 16 files, ~12 s |
+| `npm test`: unit (174), integration (155) and property (1 suite), all against a scripted fake LLM so races are reproducible | **330 passed** in 16 files, ~12 s |
 | `npm run test:e2e`: Playwright against the real built server in fake mode, Chromium (stream, typing dots, steer, stop, reload mid-stream and after, standing instruction across reload, no internals in the UI) | **8 of 8 passed**, ~20 s |
 | Property tests: fast-check over random interleavings of sends, steers, stops, reloads, token arrival and 75 ms flush timers, with fake timers | **100 runs** per `npm test`; **13,000 runs** passed with `PROPERTY_RUNS=13000` (~160 s) |
 | `npm run typecheck` (strict) | clean |
@@ -193,7 +193,7 @@ Full table and representative failures: [docs/notes/eval-results.md](docs/notes/
 | ✅ **Group chat** | Three personas streaming concurrently with private notes, bid gate, dedup, waves and budgets |
 | ✅ **Steering** | `@Name` steers, stop, continue or replace, standing instructions, late-steer reopen; instant client-side freeze |
 | ✅ **Ordering and persistence** | Single-writer event log in SQLite WAL; reload and reconnect replay by `seq`; crash recovery |
-| ✅ **Tests** | 322 Vitest tests, 8 Playwright specs, property tests (13,000 runs explored), strict typecheck |
+| ✅ **Tests** | 330 Vitest tests, 8 Playwright specs, property tests (13,000 runs explored), strict typecheck |
 | ✅ **Real-model evals** | Harness and cases built and run against OpenAI; results in [docs/notes/eval-results.md](docs/notes/eval-results.md) |
 | ✅ **Deploy** | Live on Fly.io: [lumen-group-chat.fly.dev](https://lumen-group-chat.fly.dev) (one machine, SQLite on a volume, rate-limited) |
 
