@@ -5,6 +5,7 @@ import { fakeRequests, resetFake, setFakeScript, type FakeReply } from '../../sr
 import { buildPrompt } from '../../src/server/agents/prompt.js';
 import { startGeneration, type Generation } from '../../src/server/orchestrator/generation.js';
 import {
+  QUEUE_DRIP_MS,
   QUEUE_STALL_MS,
   RECOVER_REPLY_MS,
   handleStop,
@@ -1533,6 +1534,31 @@ describe('a message queued behind a stream', () => {
     expect(Date.now() - t0).toBeLessThan(2000);
     expect(msg(theo.messageId)).toMatchObject({ status: 'stopped', text: 'Half' });
     expect(startedBy('theo')).toHaveLength(2);
+  });
+
+  it('a steer cutting the text is not mistaken for a stream that has stopped moving', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    setFakeScript((r): FakeReply => {
+      if (r.kind === 'classify') return { object: NEW_MESSAGE };
+      if (r.kind === 'replace') return { chunks: STEERED, delayMs: 40 };
+      if (r.kind === 'reply' && !fakeRequests.some((x) => x.kind === 'replace')) {
+        return { chunks: Array.from({ length: 60 }, (_, i) => `word${i} `), delayMs: 10 };
+      }
+      return { chunks: ['Answer.'], delayMs: 1 };
+    });
+    const theo = start('theo');
+    await waitFor(() => theo.textSoFar().length > 30);
+    quick();
+    const queued = await send('Theo, a new topic');
+    await waitFor(() => resolved().length === 1);
+    // Long after the wait began, a steer rewrites Theo.
+    const real = Date.now.bind(Date);
+    vi.spyOn(Date, 'now').mockImplementation(() => real() + QUEUE_DRIP_MS + 1000);
+    theo.lastActivityAt = Date.now();
+    theo.restart('replace', 0, ['in French'], { moved: true });
+    await queued.settled;
+    expect(warn.mock.calls.flat().join(' ')).not.toContain('stalled');
+    expect(msg(theo.messageId)).toMatchObject({ status: 'done', text: STEERED.join('') });
   });
 
   it('leaves a healthy stream to finish', async () => {

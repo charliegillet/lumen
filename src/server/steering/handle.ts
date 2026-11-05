@@ -411,14 +411,18 @@ function startPrefetch(actor: ConversationActor, named: AgentId[], userSeq: numb
 
 /** Waits for streams a new message queued behind, giving up on any that has hung or barely moves. */
 async function waitBehind(busy: Generation[]): Promise<void> {
+  // A steer cuts the text and starts over, so pace is measured per segment.
+  const mark = (g: Generation, at: number) => ({ segment: g.segment, from: g.textSoFar().length, at });
   const t0 = Date.now();
-  const from = new Map(busy.map((g) => [g, g.textSoFar().length]));
+  const pace = new Map(busy.map((g) => [g, mark(g, t0)]));
   const watch = setInterval(() => {
     const now = Date.now();
     for (const g of busy) {
       if (!g.isLive()) continue;
-      const moved = g.textSoFar().length - (from.get(g) ?? 0);
-      const dripping = now - t0 >= QUEUE_DRIP_MS && moved < ((now - t0) / 1000) * QUEUE_DRIP_CHARS_PER_S;
+      let p = pace.get(g)!;
+      if (p.segment !== g.segment) pace.set(g, (p = mark(g, now)));
+      const moved = g.textSoFar().length - p.from;
+      const dripping = now - p.at >= QUEUE_DRIP_MS && moved < ((now - p.at) / 1000) * QUEUE_DRIP_CHARS_PER_S;
       // A stream still reasoning towards its first word gets longer before it counts as hung.
       const patience = g.firstTokenSeen ? QUEUE_STALL_MS : QUEUE_STALL_MS * 3;
       if (now - g.lastActivityAt >= patience || dripping) g.abandon('stalled with a message waiting behind it');
