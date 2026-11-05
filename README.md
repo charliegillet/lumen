@@ -126,7 +126,7 @@ Settings live in `.env` (see [.env.example](.env.example)): `OPENAI_API_KEY`, th
 
 ## Model
 
-Tested on 2026-11-03 with OpenAI `gpt-5.6-luna` for the agents, the bid gate and the steer classifier, and `gpt-6-sol` as the eval judge. Models are plain `provider:model` strings resolved by the Vercel AI SDK registry, so swapping needs no code change:
+Tested on 2026-11-03 and 2026-11-04 with OpenAI `gpt-5.6-luna` for the agents, the bid gate and the steer classifier, and `gpt-6-sol` as the eval judge. Models are plain `provider:model` strings resolved by the Vercel AI SDK registry, so swapping needs no code change:
 
 ```
 MODEL_AGENT=openai:gpt-5.6-luna      MODEL_AGENT_MAYA=anthropic:<model>
@@ -149,7 +149,7 @@ MODEL_JUDGE=openai:gpt-6-sol
 | `npm run typecheck` (strict) | clean |
 | `npm run eval`: real models, judged by `gpt-6-sol`, reported as pass rates over k runs | see [Evals](#evals) |
 
-Measured on 2026-11-03 on this repository. Invariants the tests defend, regardless of timing:
+Measured on 2026-11-04 on this repository. Invariants the tests defend, regardless of timing:
 
 1. `seq` is gap-free and increasing; clients see exactly the log.
 2. `fold(log)` equals the live view; snapshot plus catch-up equals the view; a fresh actor over the same database reaches the same view.
