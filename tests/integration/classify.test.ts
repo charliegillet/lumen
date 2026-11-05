@@ -34,6 +34,17 @@ describe('classifySteer', () => {
     expect(fakeRequests[0]!.system).toMatch(/stop-like opener followed by an instruction[^\n]*is "steer", not "stop"/);
   });
 
+  it('guides the classifier to default to one_off and never store probes or facts', async () => {
+    setFakeScript(() => ({ error: 'boom' }));
+    await classifySteer(base);
+    const sys = fakeRequests[0]!.system;
+    expect(sys).toMatch(/default to "one_off"/);
+    expect(sys).toMatch(/NEVER standing/);
+    expect(sys).toMatch(/vague revocation/);
+    expect(sys).toMatch(/"wrap it up"/);
+    expect(sys).not.toMatch(/ambiguous, choose standing/);
+  });
+
   it('request contains no private notes canary', async () => {
     setFakeScript(() => ({ object: { kind: 'new_message', targets: [], apply: 'continue', scope: 'one_off', standing_text: null, revokes: [] } }));
     await classifySteer({ ...base, instructions: [{ id: 'i1', scope: 'all', text: 'be brief' }] });
