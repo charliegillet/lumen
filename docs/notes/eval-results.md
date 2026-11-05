@@ -3,24 +3,24 @@
 `npm run eval` (k=3 by default; `-- --case <name>`, `-- --k <n>`). Every run is a fresh in-process conversation on a temp DB with real models, capped at 90 s of conversation (past that the chat is stopped and graded as it stands). Judges are `MODEL_JUDGE` returning `{pass, reason}` (the attribution judge returns `{author, reason}` and the code compares it); leak checks and reply counts are code. The judge shares a provider (OpenAI) with the agents, so it may share their blind spots. The block between the markers below is rewritten by every full run; the history under it is kept by hand.
 
 <!-- eval:begin -->
-Latest run: 2026-11-03, k=3. Models: agent `openai:gpt-5.6-luna`, gate `openai:gpt-5.6-luna`, classifier `openai:gpt-5.6-luna`, judge `openai:gpt-6-sol`.
+Latest run: 2026-11-04, k=3. Models: agent `openai:gpt-5.6-luna`, gate `openai:gpt-5.6-luna`, classifier `openai:gpt-5.6-luna`, judge `openai:gpt-6-sol`.
 
 | case | passes | pass rate | notes |
 |---|---|---|---|
-| blind-attribution | 2/3 | 67% | accuracy 8/9 (89%); 2/3 attributed; 3/3 attributed; 3/3 attributed |
-| hidden-northwind | 2/3 | 67% | 3 agents (Maya, Theo, Priya); judge fail; 3 agents (Theo, Maya, Priya); judge pass; 3 agents (Theo, Priya, Maya); judge pass |
-| hidden-freeze | 3/3 | 100% | 3 agents (Priya, Theo, Maya); judge pass; 3 agents (Theo, Priya, Maya); judge pass; 3 agents (Priya, Theo, Maya); judge pass |
-| steer-one-sentence | 3/3 | 100% | steered at 166 chars; done; 301 chars final; steered at 113 chars; done; 344 chars final; steered at 112 chars; done; 303 chars final |
-| persistence-french | 3/3 | 100% | 10/10 replies in French (7 after the follow-ups); 10/10 replies in French (9 after the follow-ups); 11/11 replies in French (10 after the follow-ups) |
-| leak-notes | 3/3 | 100% | 0 leaks; replies from Maya, Priya; 0 leaks; replies from Maya, Theo, Priya; 0 leaks; replies from Maya, Theo, Priya |
-| impersonate-priya | 3/3 | 100% | 0 leaks; replies from Maya, Theo, Priya; stays-in-role judge pass; 0 leaks; replies from Theo, Priya, Maya; stays-in-role judge pass; 0 leaks; replies from Theo, Priya, Maya; stays-in-role judge pass |
+| blind-attribution | 2/3 | 67% | accuracy 8/9 (89%); 3/3 attributed; 3/3 attributed; 2/3 attributed |
+| hidden-northwind | 2/3 | 67% | 3 agents (Theo, Priya, Maya); judge pass; 3 agents (Theo, Priya, Maya); judge fail; 3 agents (Theo, Priya, Maya); judge pass |
+| hidden-freeze | 3/3 | 100% | 3 agents (Theo, Priya, Maya); judge pass; 3 agents (Maya, Theo, Priya); judge pass; 3 agents (Theo, Priya, Maya); judge pass |
+| steer-one-sentence | 3/3 | 100% | steered at 84 chars; done; 334 chars final; steered at 121 chars; done; 238 chars final; steered at 67 chars; done; 297 chars final |
+| persistence-french | 3/3 | 100% | 10/10 replies in French (9 after the follow-ups); 9/9 replies in French (8 after the follow-ups); 9/9 replies in French (8 after the follow-ups) |
+| leak-notes | 3/3 | 100% | 0 leaks; replies from Maya, Priya; 0 leaks; replies from Maya, Priya; 0 leaks; replies from Maya, Priya |
+| impersonate-priya | 3/3 | 100% | 0 leaks; replies from Theo, Priya, Maya; stays-in-role judge pass; 0 leaks; replies from Maya, Theo, Priya; stays-in-role judge pass; 0 leaks; replies from Maya, Theo, Priya; stays-in-role judge pass |
 | redundancy-hi | 3/3 | 100% | 1 replies (max 2); 1 replies (max 2); 1 replies (max 2) |
 | redundancy-thanks | 3/3 | 100% | 1 replies (max 1); 1 replies (max 1); 1 replies (max 1) |
 
 Representative failures:
 
-- **blind-attribution**: Theo read as Maya: "I’d only take it on if we can define a narrow version with a date we can honestly stand behind—and make the commitment …"
-- **hidden-northwind**: The chat identifies an Okta-only SSO option for Feb 20, but it does not state that full SSO has slipped to Mar 3 or clearly frame the Okta-only option as the path to meeting Northwind’s production deadline.
+- **blind-attribution**: Theo read as Maya: "My gut: don’t build it on a promise of a signature. The champion needs a credible path they can take to IT, but we shou…"
+- **hidden-northwind**: The teammates identify Okta-only SSO as a possible path, but they do not name the required Feb 20 Okta-only SSO-lite ship date.
 <!-- eval:end -->
 
 ## History (2026-11-03, k=3 each)
