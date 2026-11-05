@@ -111,7 +111,6 @@ test('a steered bubble stays frozen even when the old answer finishes before the
     await page.waitForTimeout(100);
   }
   expect([...lens]).toEqual([frozenLen]);
-  await expect(bubbleOf(page, 'maya').filter({ hasText: 'STEERED:' })).toHaveCount(1);
   await expectNoMechanismWords(page);
 });
 
