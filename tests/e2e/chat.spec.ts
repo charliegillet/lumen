@@ -93,6 +93,28 @@ test('typing dots show for agents that started, then give way to their words', a
   await expectNoMechanismWords(page);
 });
 
+test('a steered bubble stays frozen even when the old answer finishes before the steer lands', async ({ page }) => {
+  await open(page);
+  await say(page, 'what should we do about pricing?'); // short fake answers: done well inside the hold
+  await allStreaming(page);
+  // Hold the steer's POST so the server completes the old answer while the person's send is unresolved.
+  await page.route('**/messages', async (route) => {
+    if (route.request().postData()?.includes('@Maya shorter')) await new Promise((r) => setTimeout(r, 4000));
+    await route.continue();
+  });
+  await say(page, '@Maya shorter');
+  const frozenLen = (await bubbleOf(page, 'maya').innerText()).length;
+  // Theo and Priya finish within this window; Maya's bubble must not gain a single character.
+  const lens = new Set<number>();
+  for (let i = 0; i < 25; i++) {
+    lens.add((await bubbleOf(page, 'maya').innerText()).length);
+    await page.waitForTimeout(100);
+  }
+  expect([...lens]).toEqual([frozenLen]);
+  await expect(bubbleOf(page, 'maya').filter({ hasText: 'STEERED:' })).toHaveCount(1);
+  await expectNoMechanismWords(page);
+});
+
 test('steer by name mid-stream', async ({ page }) => {
   await open(page);
   await say(page, LONG);
