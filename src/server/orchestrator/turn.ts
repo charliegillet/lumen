@@ -68,6 +68,8 @@ interface WaveEntry {
   addresses: Bid['addresses'];
 }
 
+/** Coming back after already answering takes the top novelty score. */
+const REENTRY_NOVELTY = 3;
 /** How much of each earlier message later gists are compared with. */
 const SAID_CHARS = 300;
 
@@ -301,13 +303,12 @@ function excludedAt(hop: number, addressed: boolean, last: Spoken[]): AgentId[] 
   return barred.map((s) => s.agentId);
 }
 
-/** Of those who spoke in the last wave, at most one comes back on its own: the one with the most to add. */
+/** Of those who spoke in the last wave, at most one comes back on its own, and only with something truly new. */
 function oneReentrant(selected: Speaker[], lastWave: AgentId[], forced: AgentId[], bids: Bid[], hop: number): Speaker[] {
   if (hop !== 1) return selected;
   const back = selected.filter((s) => lastWave.includes(s.agentId) && !forced.includes(s.agentId));
-  if (back.length <= 1) return selected;
   const novelty = (s: Speaker) => bids.find((b) => b.agentId === s.agentId)?.novelty ?? 0;
-  const keep = [...back].sort((x, y) => novelty(y) - novelty(x))[0]!;
+  const keep = [...back].sort((x, y) => novelty(y) - novelty(x)).find((s) => novelty(s) >= REENTRY_NOVELTY);
   return selected.filter((s) => !back.includes(s) || s === keep);
 }
 
@@ -370,6 +371,7 @@ async function gatherBids(
   const answered = () => {
     timer ??= setTimeout(cutOff, GATE_GRACE_MS);
   };
+  signal.addEventListener('abort', cutOff, { once: true });
   try {
     return await Promise.all(
       ids.map(async (id) => {
@@ -386,6 +388,7 @@ async function gatherBids(
     );
   } finally {
     if (timer !== null) clearTimeout(timer);
+    signal.removeEventListener('abort', cutOff);
   }
 }
 

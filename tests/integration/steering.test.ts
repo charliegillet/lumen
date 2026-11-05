@@ -1,10 +1,18 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { openDb, type Db } from '../../src/server/db.js';
-import { ConversationActor } from '../../src/server/actor.js';
+import { ConversationActor, getActor } from '../../src/server/actor.js';
 import { fakeRequests, resetFake, setFakeScript, type FakeReply } from '../../src/server/llm/fake.js';
 import { buildPrompt } from '../../src/server/agents/prompt.js';
 import { startGeneration, type Generation } from '../../src/server/orchestrator/generation.js';
-import { handleStop, handleUserMessage, keepStanding, shown, type SendInput } from '../../src/server/steering/handle.js';
+import {
+  QUEUE_STALL_MS,
+  RECOVER_REPLY_MS,
+  handleStop,
+  handleUserMessage,
+  keepStanding,
+  shown,
+  type SendInput,
+} from '../../src/server/steering/handle.js';
 import type { SteerDecision } from '../../src/server/steering/classify.js';
 import type { AgentId, ConvEvent } from '../../src/shared/events.js';
 
@@ -999,5 +1007,539 @@ describe('standing instructions', () => {
     s.classify = () => ({ ...NEW_MESSAGE, scope: 'standing', standing_text: 'Answer in English.', revokes: ['i1'] });
     await (await send('from now on, English please')).settled;
     expect(actor.view.instructions.map((i) => i.text)).toEqual(['Answer in English.']);
+  });
+});
+
+describe('typed stops', () => {
+  it.each(['please stop', 'ok stop', 'stop it', 'never mind', 'cancel that', 'enough', "that's enough", 'ok that is enough'])(
+    '"%s" stops everyone at once, with no classifier',
+    async (text) => {
+      const g = startAll();
+      await waitFor(() => Object.values(g).every((x) => x.textSoFar().length > 0));
+      await (await send(text)).settled;
+      for (const x of Object.values(g)) expect(msg(x.messageId)?.status).toBe('stopped');
+      expect(fakeRequests.some((r) => r.kind === 'classify')).toBe(false);
+    },
+  );
+
+  it('"tell priya to stop" stops only Priya', async () => {
+    const g = startAll();
+    await waitFor(() => Object.values(g).every((x) => x.textSoFar().length > 0));
+    await (await send('tell priya to stop')).settled;
+    expect(msg(g.priya.messageId)?.status).toBe('stopped');
+    await idle();
+    expect(msg(g.maya.messageId)?.status).toBe('done');
+    expect(msg(g.theo.messageId)?.status).toBe('done');
+  });
+
+  it('"Maya and Theo stop, Priya keep going" leaves Priya alone', async () => {
+    const g = startAll();
+    await waitFor(() => Object.values(g).every((x) => x.textSoFar().length > 0));
+    await (await send('Maya and Theo stop, Priya keep going')).settled;
+    expect(msg(g.maya.messageId)?.status).toBe('stopped');
+    expect(msg(g.theo.messageId)?.status).toBe('stopped');
+    await idle();
+    expect(msg(g.priya.messageId)?.status).toBe('done');
+  });
+
+  it('a question right after a typed stop still gets an answer', async () => {
+    s.gate = (id, prompt) => id === 'priya' && prompt.includes('0 replies deep');
+    const g = startAll();
+    await waitFor(() => g.theo.textSoFar().length > 0);
+    const a = await send('ok that is enough');
+    const b = await send('What is our runway?');
+    await Promise.all([a.settled, b.settled]);
+    await idle();
+    expect(startedBy('priya').length).toBe(2);
+  });
+});
+
+describe('dropping a topic', () => {
+  const ask = (text: string) => actor.view.messages.find((m) => m.author.kind === 'user' && m.text === text);
+
+  it('"never mind X, Y" ends the old answers and gates everyone on the new ask', async () => {
+    s.gate = (id, prompt) => id === 'priya' && prompt.includes('runway');
+    const first = await send('Will we keep Northwind?');
+    s.gate = () => true;
+    await waitFor(() => actor.generations.size === 3);
+    const old = [...actor.generations.values()];
+    await waitFor(() => old.every((g) => g.textSoFar().length > 0));
+    s.gate = (id, prompt) => id === 'priya' && prompt.includes('runway') && prompt.includes('0 replies deep');
+    const second = await send('actually never mind Northwind, what is our runway?');
+    await Promise.all([first.settled, second.settled]);
+    await idle();
+
+    for (const g of old) expect(msg(g.messageId)?.status).toBe('stopped');
+    // The old turn started nothing more; the new one answers the new ask.
+    const after = events().filter((e) => e.seq > second.seq && e.type === 'message_started');
+    expect(after.map((e) => (e.type === 'message_started' ? e.agentId : ''))).toEqual(['priya']);
+    expect(ask('Will we keep Northwind?')?.dropped).toBe(true);
+    expect(ask('actually never mind Northwind, what is our runway?')?.dropped).toBeUndefined();
+  });
+
+  it('marks the previous ask dropped even when nothing is running', async () => {
+    await (await send('Will we keep Northwind?')).settled;
+    await idle();
+    await (await send('never mind that. Favourite colour?')).settled;
+    await idle();
+    expect(ask('Will we keep Northwind?')?.dropped).toBe(true);
+    // The new ask gets an answer even if every gate declines.
+    const last = actor.view.messages.at(-1);
+    expect(last?.author.kind).toBe('agent');
+  });
+
+  it('a classifier saying stop does not swallow the new question', async () => {
+    s.classify = () => ({ ...NEW_MESSAGE, kind: 'stop' });
+    await (await send('Never mind all that. Favourite colour?')).settled;
+    await idle();
+    expect(actor.view.messages.at(-1)?.author.kind).toBe('agent');
+  });
+
+  it('a queued reply to the old ask does not start', async () => {
+    const theo = start('theo');
+    await waitFor(() => theo.textSoFar().length > 0);
+    const a = await send('Theo, what about the renewal?'); // waits for Theo
+    await waitFor(() => resolved().length === 1);
+    s.gate = () => false;
+    const b = await send('forget that, what is our runway?');
+    await Promise.all([a.settled, b.settled]);
+    await idle();
+    expect(events().filter((e) => e.type === 'message_started' && e.seq < b.seq)).toHaveLength(1);
+    expect(msg(theo.messageId)?.status).toBe('stopped');
+  });
+
+  it('a stop marks what it called off, and agents are told in later prompts', async () => {
+    s.gate = (_id, prompt) => prompt.includes('0 replies deep');
+    const r = await send('Will we keep Northwind?');
+    await waitFor(() => actor.generations.size === 3);
+    const cut = [...actor.generations.values()];
+    await waitFor(() => cut.every((g) => g.textSoFar().length > 0));
+    handleStop(actor, { clientReqId: 'stop-d', rendered: renderedNow() });
+    await r.settled;
+    expect(ask('Will we keep Northwind?')?.dropped).toBe(true);
+    for (const g of cut) expect(msg(g.messageId)?.dropped).toBe(true);
+
+    await (await send('What is our runway?')).settled;
+    await idle();
+    const reply = fakeRequests.filter((x) => x.kind === 'reply').at(-1)!;
+    const history = JSON.stringify(reply.messages);
+    expect(history).toContain('dropped=\\"true\\">Will we keep Northwind?');
+    expect(history).not.toContain('dropped=\\"true\\">What is our runway?');
+    // An agent's own cut answer no longer reads as its last word.
+    const own = reply.messages.filter((m) => m.role === 'assistant').map((m) => String(m.content));
+    expect(own.join('')).not.toContain(unsteeredText(reply.agentId!).slice(0, 4));
+  });
+
+  it('a targeted stop calls nothing off', async () => {
+    const g = startAll();
+    await waitFor(() => g.theo.textSoFar().length > 0);
+    await (await send('@Theo stop')).settled;
+    await idle();
+    expect(events().some((e) => e.type === 'asks_dropped')).toBe(false);
+  });
+});
+
+describe('carrying on after a stop', () => {
+  it('"sorry, carry on Theo" picks Theo up where he was cut, in the same message', async () => {
+    const g = startAll();
+    await waitFor(() => Object.values(g).every((x) => x.textSoFar().length > 0));
+    handleStop(actor, { clientReqId: 's', rendered: renderedNow() });
+    const before = msg(g.theo.messageId)!.text;
+    await (await send('sorry, carry on Theo')).settled;
+    await idle();
+    expect(startedBy('theo')).toHaveLength(1);
+    expect(segmentsFor(g.theo.messageId)[0]).toMatchObject({ mode: 'continue', truncateTo: before.length, moved: true });
+    expect(msg(g.theo.messageId)).toMatchObject({ status: 'done', text: `${before}${STEERED.join('')}` });
+    expect(msg(g.maya.messageId)?.status).toBe('stopped');
+    expect(resolved().at(-1)).toMatchObject({ targets: ['theo'] });
+    expect(fakeRequests.some((r) => r.kind === 'classify')).toBe(false);
+  });
+
+  it('a plain "finish your thought" resumes everyone a stop cut', async () => {
+    const g = startAll();
+    await waitFor(() => Object.values(g).every((x) => x.textSoFar().length > 0));
+    handleStop(actor, { clientReqId: 's', rendered: renderedNow() });
+    await (await send('finish your thought')).settled;
+    await idle();
+    for (const x of Object.values(g)) expect(msg(x.messageId)?.status).toBe('done');
+    expect(events().filter((e) => e.type === 'message_started')).toHaveLength(3);
+  });
+
+  it('"continue" with nothing stopped is an ordinary message', async () => {
+    await (await send('continue')).settled;
+    await idle();
+    expect(fakeRequests.some((r) => r.kind === 'classify')).toBe(true);
+  });
+});
+
+describe('steers show up fast', () => {
+  it('an @named steer restarts the agent before the classifier answers', async () => {
+    let release!: () => void;
+    hooks.before = (meta) => (meta.kind === 'classify' ? new Promise<void>((r) => (release = r)) : undefined);
+    const g = startAll();
+    await waitFor(() => g.theo.textSoFar().length > 0);
+    s.classify = () => steer(['theo']);
+    const r = await send('@Theo one sentence');
+    expect(segmentsFor(g.theo.messageId)).toHaveLength(1);
+    await waitFor(() => msg(g.theo.messageId)!.text.includes('STEERED'));
+    expect(resolved()).toHaveLength(0);
+    release();
+    await r.settled;
+    await idle();
+    expect(segmentsFor(g.theo.messageId)).toHaveLength(1);
+    expect(steerRequests('theo')).toHaveLength(1);
+    expect(resolved().at(-1)).toMatchObject({ targets: ['theo'] });
+  });
+
+  it('the classifier can still turn it into a full rewrite', async () => {
+    const g = startAll();
+    await waitFor(() => g.theo.textSoFar().length > 0);
+    s.classify = () => steer(['theo'], 'replace');
+    await (await send('@Theo cover pricing and drop the rest')).settled;
+    await idle();
+    expect(segmentsFor(g.theo.messageId).map((e) => (e.type === 'message_segment_started' ? e.mode : ''))).toEqual([
+      'continue',
+      'replace',
+    ]);
+    expect(msg(g.theo.messageId)?.text).toBe(STEERED.join(''));
+    expect(steerRequests('theo').at(-1)?.prompt).toMatch(/«@Theo cover pricing and drop the rest»/);
+  });
+
+  it('the agent is not forced into another message when the classifier calls it a new message', async () => {
+    const g = startAll();
+    await waitFor(() => g.theo.textSoFar().length > 0);
+    s.classify = () => NEW_MESSAGE;
+    await (await send('@Theo one sentence')).settled;
+    await idle();
+    expect(startedBy('theo')).toHaveLength(1);
+  });
+
+  it.each(['@Theo good point', '@Theo what about pricing?', '@Theo thanks', '@Theo always be brief'])(
+    '"%s" waits for the classifier',
+    async (text) => {
+      let release!: () => void;
+      hooks.before = (meta) => (meta.kind === 'classify' ? new Promise<void>((r) => (release = r)) : undefined);
+      const theo = start('theo');
+      await waitFor(() => theo.textSoFar().length > 0);
+      const r = await send(text);
+      expect(segmentsFor(theo.messageId)).toHaveLength(0);
+      await waitFor(() => release !== undefined);
+      release();
+      await r.settled;
+      await idle();
+    },
+  );
+
+  it('a steered segment skips reasoning, even on a high-effort answer', async () => {
+    const theo = startGeneration(actor, {
+      agentId: 'theo',
+      turnId: 't',
+      hop: 0,
+      replyTo: 'u1',
+      effort: 'high',
+      gist: 'g',
+      othersReplying: [],
+    });
+    await waitFor(() => theo.textSoFar().length > 0);
+    s.classify = () => steer(['theo']);
+    await (await send('@Theo one sentence')).settled;
+    await idle();
+    expect(steerRequests('theo')[0]?.reasoning).toBe('none');
+  });
+});
+
+describe('a new message when nobody is writing', () => {
+  it('gates run beside the classifier, not after it', async () => {
+    let release!: () => void;
+    hooks.before = (meta) => (meta.kind === 'classify' ? new Promise<void>((r) => (release = r)) : undefined);
+    s.gate = (id) => id === 'priya';
+    const r = await send('What is our runway?');
+    await waitFor(() => fakeRequests.filter((x) => x.kind === 'gate').length === 3);
+    expect(events().some((e) => e.type === 'message_started')).toBe(false); // nobody speaks before it is decided
+    release();
+    await r.settled;
+    await idle();
+    expect(startedBy('priya')).toHaveLength(1);
+  });
+
+  it('a named agent speaks with no gate for anyone else', async () => {
+    await (await send('@Theo what is the status')).settled;
+    await idle();
+    expect(fakeRequests.filter((x) => x.kind === 'gate').map((x) => x.agentId)).toEqual(['theo']);
+    expect(events().filter((e) => e.type === 'message_started')).toHaveLength(1);
+    expect(startedBy('theo')).toHaveLength(1);
+  });
+
+  it('a discarded classification costs no reply', async () => {
+    s.gate = () => true;
+    s.classify = () => ({ ...NEW_MESSAGE, kind: 'stop' });
+    await (await send('that will do for today')).settled;
+    await sleep(30);
+    expect(events().some((e) => e.type === 'message_started')).toBe(false);
+  });
+});
+
+describe('instruction-only messages', () => {
+  it('get one short acknowledgement, not a thread', async () => {
+    s.gate = () => true;
+    s.classify = () => ({ ...NEW_MESSAGE, scope: 'standing', standing_text: 'Answer in English.' });
+    await (await send('back to English')).settled;
+    await idle();
+    const replies = events().filter((e) => e.type === 'message_started');
+    expect(replies).toHaveLength(1);
+    expect(replies[0]).toMatchObject({ effort: 'low' });
+    expect(fakeRequests.find((r) => r.kind === 'reply')?.prompt).toContain('Acknowledge');
+  });
+
+  it('a question alongside the instruction still gets a real turn', async () => {
+    s.gate = (_id, prompt) => prompt.includes('0 replies deep');
+    s.classify = () => ({ ...NEW_MESSAGE, scope: 'standing', standing_text: 'Answer in English.' });
+    await (await send('from now on English. What is our runway?')).settled;
+    await idle();
+    expect(events().filter((e) => e.type === 'message_started')).toHaveLength(3);
+  });
+});
+
+describe('instructions in order', () => {
+  it('a quick correction sees the instruction it corrects', async () => {
+    let releaseFirst!: () => void;
+    let n = 0;
+    hooks.before = (meta) => {
+      if (meta.kind !== 'classify') return undefined;
+      n += 1;
+      return n === 1 ? new Promise<void>((r) => (releaseFirst = r)) : undefined;
+    };
+    s.classify = (text) =>
+      text.includes('French')
+        ? { ...NEW_MESSAGE, scope: 'standing', standing_text: 'Answer in French.' }
+        : { ...NEW_MESSAGE, revokes: actor.view.instructions.map((i) => i.id) };
+    const a = await send('switch to French');
+    const b = await send('no, stay in English');
+    await waitFor(() => n === 2);
+    await sleep(10);
+    expect(resolved()).toHaveLength(0); // the correction waits for what it corrects
+    releaseFirst();
+    await Promise.all([a.settled, b.settled]);
+    await idle();
+    expect(actor.view.instructions).toEqual([]);
+    expect(resolved().map((e) => e.userMessageId)).toEqual(
+      actor.view.messages.filter((m) => m.author.kind === 'user' && m.text !== 'What should we build?').map((m) => m.id),
+    );
+  });
+
+  it('a revoke aimed at one agent leaves the rule for everyone else', async () => {
+    actor.append({ type: 'instruction_set', instructionId: 'fr', scope: 'all', text: 'Answer in French.' });
+    s.classify = () => ({ ...NEW_MESSAGE, targets: ['maya'], scope: 'standing', standing_text: 'Answer in English.', revokes: ['fr'] });
+    await (await send('@Maya switch back to English from now on')).settled;
+    await idle();
+    expect(actor.view.instructions).toEqual([
+      expect.objectContaining({ id: 'fr', scope: 'all' }),
+      expect.objectContaining({ scope: 'maya', text: 'Answer in English.' }),
+    ]);
+  });
+
+  it('a one-off revoke aimed at one agent becomes that agent\'s own rule', async () => {
+    actor.append({ type: 'instruction_set', instructionId: 'fr', scope: 'all', text: 'Answer in French.' });
+    s.classify = () => ({ ...NEW_MESSAGE, targets: ['maya'], revokes: ['fr'] });
+    await (await send('@Maya no, stay in English')).settled;
+    await idle();
+    expect(actor.view.instructions).toEqual([
+      expect.objectContaining({ id: 'fr' }),
+      expect.objectContaining({ scope: 'maya', text: '@Maya no, stay in English' }),
+    ]);
+  });
+
+  it('a rule for two named agents is theirs alone', async () => {
+    s.classify = () => ({ ...NEW_MESSAGE, targets: ['maya', 'theo'], scope: 'standing', standing_text: 'Be brief.' });
+    await (await send('Maya and Theo, from now on be brief')).settled;
+    await idle();
+    expect(actor.view.instructions.map((i) => i.scope)).toEqual(['maya', 'theo']);
+  });
+});
+
+describe('compliance redo limits', () => {
+  it('a stop that lands while the judge runs prevents the redo, even with nothing live', async () => {
+    s.judge = () => ({ object: { complies: false } });
+    let started = false;
+    let release!: () => void;
+    hooks.before = (meta) => {
+      if (meta.kind !== 'judge') return undefined;
+      started = true;
+      return new Promise<void>((r) => (release = r));
+    };
+    const theo = start('theo');
+    await waitFor(() => theo.textSoFar().length > 0);
+    s.classify = () => steer(['theo']);
+    const r = await send('@Theo in French');
+    await waitFor(() => started);
+    const text = msg(theo.messageId)!.text;
+    expect(handleStop(actor, { clientReqId: 'late', rendered: {} })).toEqual({ seq: null });
+    release();
+    await r.settled;
+    await idle();
+    expect(msg(theo.messageId)?.text).toBe(text);
+    expect(segmentsFor(theo.messageId)).toHaveLength(1);
+  });
+
+  it('no redo once someone has replied to the answer', async () => {
+    s.judge = () => ({ object: { complies: false } });
+    let release!: () => void;
+    let started = false;
+    hooks.before = (meta) => {
+      if (meta.kind !== 'judge') return undefined;
+      started = true;
+      return new Promise<void>((r) => (release = r));
+    };
+    const theo = start('theo');
+    await waitFor(() => theo.textSoFar().length > 0);
+    s.classify = () => steer(['theo']);
+    const r = await send('@Theo in French');
+    await waitFor(() => started);
+    actor.append({ type: 'message_started', messageId: 'reply', agentId: 'priya', turnId: 't', hop: 1, replyTo: theo.messageId, contextCutoffSeq: actor.lastSeq, effort: 'low' });
+    actor.append({ type: 'message_completed', messageId: 'reply' });
+    release();
+    await r.settled;
+    await idle();
+    expect(segmentsFor(theo.messageId)).toHaveLength(1);
+  });
+
+  it('a redo never leaves a brevity answer longer than it was', async () => {
+    s.judge = () => ({ object: { complies: false } });
+    let segs = 0;
+    setFakeScript((r): FakeReply => {
+      if (r.kind === 'reply') return { chunks: UNSTEERED('theo'), delayMs: 30 };
+      if (r.kind === 'classify') return { object: steer(['theo']) };
+      if (r.kind === 'judge') return { object: { complies: false } };
+      segs += 1;
+      return { chunks: [segs === 1 ? 'Short.' : 'Much, much longer than it was.'], delayMs: 2 };
+    });
+    const theo = start('theo');
+    await waitFor(() => theo.textSoFar().length > 0);
+    await (await send('@Theo one sentence', { rendered: {} })).settled;
+    await idle();
+    expect(msg(theo.messageId)).toMatchObject({ text: 'Short.', status: 'done' });
+  });
+
+  it('a redo that fails puts the steered answer back', async () => {
+    let segs = 0;
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    setFakeScript((r): FakeReply => {
+      if (r.kind === 'reply') return { chunks: UNSTEERED('theo'), delayMs: 30 };
+      if (r.kind === 'classify') return { object: steer(['theo'], 'replace') };
+      if (r.kind === 'judge') return { object: { complies: false } };
+      segs += 1;
+      return segs === 1 ? { chunks: ['The steered answer.'], delayMs: 2 } : { chunks: [], delayMs: 0 };
+    });
+    const theo = start('theo');
+    await waitFor(() => theo.textSoFar().length > 0);
+    await (await send('@Theo in French')).settled;
+    await idle();
+    expect(msg(theo.messageId)?.text).toBe('The steered answer.');
+  });
+});
+
+describe('a message queued behind a stream', () => {
+  const quick = () => {
+    const real = setInterval;
+    vi.spyOn(globalThis, 'setInterval').mockImplementation(((fn: () => void) => real(fn, 5)) as typeof setInterval);
+  };
+
+  it('gives up on a hung stream', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    setFakeScript((r): FakeReply => {
+      if (r.kind === 'classify') return { object: NEW_MESSAGE };
+      if (r.kind === 'reply' && !fakeRequests.some((x) => x.kind === 'reply' && x !== r)) {
+        return { chunks: ['Half', ' an answer'], delayMs: 1, hangAfterChunks: 1 };
+      }
+      return { chunks: ['Answer.'], delayMs: 1 };
+    });
+    const theo = start('theo');
+    await waitFor(() => theo.textSoFar() === 'Half');
+    theo.lastActivityAt -= QUEUE_STALL_MS;
+    quick();
+    const t0 = Date.now();
+    await (await send('Theo, a new topic')).settled;
+    expect(Date.now() - t0).toBeLessThan(2000);
+    expect(msg(theo.messageId)).toMatchObject({ status: 'stopped', text: 'Half' });
+    expect(startedBy('theo')).toHaveLength(2);
+  });
+
+  it('leaves a healthy stream to finish', async () => {
+    const theo = start('theo');
+    await waitFor(() => theo.textSoFar().length > 0);
+    quick();
+    await (await send('Theo, good point')).settled;
+    await idle();
+    expect(msg(theo.messageId)?.status).toBe('done');
+  });
+});
+
+describe('classifier failure', () => {
+  const failing = () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    setFakeScript((r): FakeReply => {
+      if (r.kind === 'classify') return { error: 'classifier down' };
+      if (r.kind === 'gate') return { object: { should_respond: false, novelty: 0, gist: '', addresses: [], effort: 'low' } };
+      if (r.kind === 'dedup') return { object: { clusters: [] } };
+      return { chunks: UNSTEERED(r.agentId ?? 'a'), delayMs: 20 };
+    });
+  };
+
+  it('retries once', async () => {
+    failing();
+    await (await send('hello there')).settled;
+    await idle();
+    expect(fakeRequests.filter((r) => r.kind === 'classify')).toHaveLength(2);
+  });
+
+  it('chatter sent mid-stream does not restart anyone', async () => {
+    failing();
+    const g = startAll();
+    await waitFor(() => g.theo.textSoFar().length > 0);
+    await (await send('thanks, unrelated: who is on call?')).settled;
+    await idle();
+    for (const x of Object.values(g)) expect(segmentsFor(x.messageId)).toHaveLength(0);
+  });
+
+  it('an imperative mid-stream still steers', async () => {
+    failing();
+    const g = startAll();
+    await waitFor(() => Object.values(g).every((x) => x.textSoFar().length > 0));
+    await (await send('keep it short')).settled;
+    await idle();
+    for (const x of Object.values(g)) expect(segmentsFor(x.messageId)).toHaveLength(1);
+  });
+
+  it('a language rule is kept without a classifier', async () => {
+    failing();
+    await (await send('answer in French please')).settled;
+    await idle();
+    expect(actor.view.instructions.map((i) => i.text)).toEqual(['answer in French please']);
+  });
+});
+
+describe('crash while deciding', () => {
+  it('finishes the undecided message when the conversation is next loaded', async () => {
+    s.classify = () => ({ ...NEW_MESSAGE, scope: 'standing', standing_text: 'Answer in French.' });
+    const d = openDb(':memory:');
+    const before = new ConversationActor(d, 'crashed');
+    before.append({ type: 'user_message', messageId: 'lost', clientMsgId: 'c', text: 'from now on, answer in French' });
+
+    const after = getActor(d, 'crashed');
+    await waitFor(() => after.eventsAfter(0).some((e) => e.type === 'steer_resolved'));
+    expect(after.view.instructions.map((i) => i.text)).toEqual(['Answer in French.']);
+    await waitFor(() => after.generations.size === 0 && after.turnAbort === null);
+    d.close();
+  });
+
+  it('an old undecided message is closed without a reply', () => {
+    const d = openDb(':memory:');
+    const before = new ConversationActor(d, 'old');
+    const spy = vi.spyOn(Date, 'now').mockReturnValue(Date.now() - RECOVER_REPLY_MS - 1000);
+    before.append({ type: 'user_message', messageId: 'lost', clientMsgId: 'c', text: 'hello?' });
+    spy.mockRestore();
+    const after = getActor(d, 'old');
+    expect(after.eventsAfter(0).map((e) => e.type)).toEqual(['user_message', 'steer_resolved']);
+    d.close();
   });
 });
