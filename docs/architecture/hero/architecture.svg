@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1836 936" width="1836" height="936" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, system-ui, Helvetica, Arial, sans-serif" role="img" aria-labelledby="t d">
 <title id="t">Lumen group chat architecture</title>
-<desc id="d">Left to right: the React browser client sends messages and stops to a Hono API as idempotent POSTs. The API appends each user message to an append-only SQLite event log through a single writer that assigns a gap-free seq, then hands every message to steering. Steering resolves @Name targets and bare stops with a regex, asks an LLM classifier whether a message is a steer or a new message, and aborts and restarts a targeted agent's segment. New messages start a turn in the orchestrator, where each agent bids from its own private notes, duplicates are dropped and replies stream in waves within message and hop budgets. Models are resolved from env strings by the Vercel AI SDK registry: OpenAI gpt-5.6-luna, or a scripted fake for tests. Token deltas are appended to the log and streamed back to the browser over resumable SSE ordered by seq. A tests band shows unit, integration, property, end-to-end and real-model eval layers.</desc>
+<desc id="d">Left to right: the React browser client sends messages and stops to a Hono API as idempotent POSTs. The API appends each user message to an append-only SQLite event log through a single writer that assigns a gap-free seq, then hands every message to steering. Steering resolves @Name targets and bare stops with a regex, asks an LLM classifier whether a message is a steer or a new message, and aborts and restarts a targeted agent's segment; the steered reply moves below the steer. New messages start a turn in the orchestrator, where each agent bids from its own private notes, duplicates are dropped and replies stream in waves within message and hop budgets. Models are resolved from env strings by the Vercel AI SDK registry: OpenAI gpt-5.6-luna, or a scripted fake for tests. Token deltas are appended to the log and streamed back to the browser over resumable SSE ordered by seq. A tests band shows unit, integration, property, end-to-end and real-model eval layers.</desc>
 <defs><filter id="sh" x="-10%" y="-10%" width="120%" height="130%"><feDropShadow dx="0" dy="2" stdDeviation="4" flood-color="#0F172A" flood-opacity="0.1"/></filter>
 <marker id="ar" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M1 1L9 5L1 9z" fill="#64748B"/></marker>
 <marker id="arE" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M1 1L9 5L1 9z" fill="#8250DF"/></marker></defs>
@@ -82,10 +82,10 @@
 <clipPath id="c8"><rect x="972" y="280" width="194" height="100" rx="14"/></clipPath>
 <rect x="972" y="280" width="194" height="100" rx="14" fill="#FFFFFF" stroke="#E2E8F0" filter="url(#sh)"/>
 <rect x="972" y="280" width="5" height="100" fill="#3178C6" clip-path="url(#c8)"/>
-<text x="990" y="309" font-size="15" font-weight="650" fill="#0F172A">Bid gate</text>
-<text x="990" y="332" font-size="13" fill="#475569">Each agent judges its own</text>
-<text x="990" y="351" font-size="13" fill="#475569">private notes: speak?</text>
-<text x="990" y="370" font-size="13" fill="#475569">With what effort?</text>
+<text x="990" y="309" font-size="15" font-weight="650" fill="#0F172A">Who answers</text>
+<text x="990" y="332" font-size="13" fill="#475569">A named agent answers</text>
+<text x="990" y="351" font-size="13" fill="#475569">alone; else each bids</text>
+<text x="990" y="370" font-size="13" fill="#475569">from its private notes</text>
 <clipPath id="c9"><rect x="972" y="396" width="194" height="100" rx="14"/></clipPath>
 <rect x="972" y="396" width="194" height="100" rx="14" fill="#FFFFFF" stroke="#E2E8F0" filter="url(#sh)"/>
 <rect x="972" y="396" width="5" height="100" fill="#3178C6" clip-path="url(#c9)"/>
@@ -109,9 +109,9 @@
 <rect x="1278" y="280" width="194" height="100" rx="14" fill="#FFFFFF" stroke="#E2E8F0" filter="url(#sh)"/>
 <rect x="1278" y="280" width="5" height="100" fill="#3178C6" clip-path="url(#c11)"/>
 <text x="1296" y="309" font-size="15" font-weight="650" fill="#0F172A">Regex fast path</text>
-<text x="1296" y="332" font-size="13" fill="#475569">@Name targets and a</text>
-<text x="1296" y="351" font-size="13" fill="#475569">bare “stop”, no model</text>
-<text x="1296" y="370" font-size="13" fill="#475569">call needed</text>
+<text x="1296" y="332" font-size="13" fill="#475569">@Name targets and stops,</text>
+<text x="1296" y="351" font-size="13" fill="#475569">all or one agent; no</text>
+<text x="1296" y="370" font-size="13" fill="#475569">model call needed</text>
 <clipPath id="c12"><rect x="1278" y="396" width="194" height="100" rx="14"/></clipPath>
 <rect x="1278" y="396" width="194" height="100" rx="14" fill="#FFFFFF" stroke="#E2E8F0" filter="url(#sh)"/>
 <rect x="1278" y="396" width="5" height="100" fill="#3178C6" clip-path="url(#c12)"/>
@@ -123,8 +123,8 @@
 <rect x="1278" y="512" width="194" height="100" rx="14" fill="#FFFFFF" stroke="#E2E8F0" filter="url(#sh)"/>
 <rect x="1278" y="512" width="5" height="100" fill="#3178C6" clip-path="url(#c13)"/>
 <text x="1296" y="541" font-size="15" font-weight="650" fill="#0F172A">Abort + restart</text>
-<text x="1296" y="564" font-size="13" fill="#475569">Segment aborted; steer is</text>
-<text x="1296" y="583" font-size="13" fill="#475569">the final user turn;</text>
+<text x="1296" y="564" font-size="13" fill="#475569">Aborts that agent’s stream;</text>
+<text x="1296" y="583" font-size="13" fill="#475569">reply moves below steer;</text>
 <text x="1296" y="602" font-size="13" fill="#475569">same bubble continues</text>
 <rect x="1570" y="150" width="222" height="482" rx="20" fill="#F5F5F5" stroke="#DEDEDE"/>
 <rect x="1586" y="166" width="131" height="30" rx="15" fill="#000000"/>
