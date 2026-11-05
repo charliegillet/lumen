@@ -3,12 +3,15 @@ import { randomUUID } from 'node:crypto';
 import { join, relative, resolve } from 'node:path';
 import { Hono, type Context } from 'hono';
 import { streamSSE } from 'hono/streaming';
+import { bodyLimit } from 'hono/body-limit';
 import { serveStatic } from '@hono/node-server/serve-static';
 import type { Db } from './db.js';
 import { getActor } from './actor.js';
 import { handleStop, handleUserMessage } from './steering/handle.js';
 import type { ConvEvent } from '../shared/events.js';
 
+/** Largest request body accepted; a 4000-char message is well under this even in JSON escapes. */
+export const MAX_BODY_BYTES = 64 * 1024;
 const CONV_ID = /^[A-Za-z0-9_-]{1,64}$/;
 const PING_MS = 20_000;
 
@@ -51,6 +54,9 @@ async function readBody(c: Context): Promise<Record<string, unknown> | null> {
   }
 }
 
+/** True when the text has something a person can see (not only spaces, control or format characters). */
+export const hasVisibleText = (t: string): boolean => /[^\s\p{Cf}\p{Cc}]/u.test(t);
+
 const bad = (c: Context, error: string) => c.json({ error }, 400);
 
 const RATE_WINDOW_MS = 60_000;
@@ -60,6 +66,8 @@ function envInt(name: string, fallback: number): number {
 }
 /** New messages one client IP may post per minute (env RATE_LIMIT_PER_MIN). */
 export const rateLimitPerMin = () => envInt('RATE_LIMIT_PER_MIN', 20);
+/** While a reply is streaming, a client may exceed the per-minute limit by this factor (steers and stops). */
+const LIVE_RATE_FACTOR = 3;
 /** User messages one conversation may hold in total (env MAX_MESSAGES_PER_CONV). */
 export const maxMessagesPerConv = () => envInt('MAX_MESSAGES_PER_CONV', 300);
 
@@ -175,12 +183,20 @@ export function createApp(db: Db): Hono {
     });
   });
 
+  const tooLarge = bodyLimit({
+    maxSize: MAX_BODY_BYTES,
+    onError: (c) => c.json({ error: 'request body too large' }, 413),
+  });
+  app.use('/api/conv/:id/messages', async (c, next) => (c.req.method === 'POST' ? tooLarge(c, next) : next()));
+  app.use('/api/conv/:id/stop', async (c, next) => (c.req.method === 'POST' ? tooLarge(c, next) : next()));
+
   app.post('/api/conv/:id/messages', async (c) => {
     const body = await readBody(c);
     if (!body) return bad(c, 'invalid JSON body');
     if (typeof body.text !== 'string') return bad(c, 'text must be a string');
-    const text = body.text.trim();
-    if (text.length === 0) return bad(c, 'text must not be empty');
+    // A lone surrogate would make every later provider request fail (it stays in history).
+    const text = body.text.toWellFormed().trim();
+    if (text.length === 0 || !hasVisibleText(text)) return bad(c, 'text must not be empty');
     if (text.length > 4000) return bad(c, 'text must be at most 4000 chars');
     const id = clientId(body.clientMsgId, 'clientMsgId');
     if (!id.ok) return bad(c, id.error);
@@ -201,10 +217,18 @@ export function createApp(db: Db): Hono {
     if (!actor.findUserMessage(id.value)) {
       const users = actor.view.messages.filter((m) => m.author.kind === 'user').length;
       if (users >= maxMessagesPerConv()) {
-        return c.json({ error: 'this conversation has reached its message limit' }, 429);
+        return c.json({ error: `this conversation has reached its limit of ${maxMessagesPerConv()} messages` }, 429);
       }
-      if (!allowIp(clientIp(c), rateLimitPerMin())) {
-        return c.json({ error: 'too many messages, try again in a minute' }, 429);
+      const ip = clientIp(c);
+      if (!allowIp(ip, rateLimitPerMin())) {
+        // Steers and stops aimed at a live reply must still get through, within a higher ceiling.
+        const live = actor.view.messages.some((m) => m.status === 'streaming');
+        if (!live || !allowIp(`live:${ip}`, rateLimitPerMin() * LIVE_RATE_FACTOR)) {
+          return c.json(
+            { error: `rate limit reached (${rateLimitPerMin()} messages per minute per client), try again in a minute` },
+            429,
+          );
+        }
       }
     }
     const { seq } = await handleUserMessage(actor, {

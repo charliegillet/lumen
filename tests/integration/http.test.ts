@@ -245,6 +245,36 @@ describe('commands', () => {
   });
 });
 
+describe('request hardening', () => {
+  it('rejects an oversized body with 413 before parsing it', async () => {
+    const big = JSON.stringify(msgBody({ text: 'a'.repeat(200_000) }));
+    const res = await app.request('/api/conv/big/messages', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: big,
+    });
+    expect(res.status).toBe(413);
+    expect(await res.json()).toHaveProperty('error');
+    const noLength = await app.request('/api/conv/big/stop', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'content-length': '10' },
+      body: big,
+    });
+    expect([400, 413]).toContain(noLength.status);
+  });
+
+  it('stores a lone surrogate as a well-formed character', async () => {
+    const res = await post('/api/conv/sur/messages', msgBody({ text: 'status? \ud83d what is new' }));
+    expect(res.status).toBe(200);
+    const text = getActor(db, 'sur').view.messages[0]!.text;
+    expect(text.isWellFormed()).toBe(true);
+  });
+
+  it.each(['\u200b\u200b', '\u0000', ' \u200d\ufeff\n'])('rejects text with nothing visible (%j)', async (text) => {
+    expect((await post('/api/conv/inv/messages', msgBody({ text }))).status).toBe(400);
+  });
+});
+
 describe('rate limits', () => {
   afterEach(() => {
     delete process.env.RATE_LIMIT_PER_MIN;
@@ -284,6 +314,28 @@ describe('rate limits', () => {
     expect((await send('9.9.9.9, 10.0.0.2', 'x2')).status).toBe(200);
     expect((await send('9.9.9.9', 'x3')).status).toBe(429);
     expect((await send('8.8.8.8, 9.9.9.9', 'x4')).status).toBe(200);
+  });
+
+  it('lets steers through past the limit while a reply is streaming, up to a ceiling', async () => {
+    process.env.RATE_LIMIT_PER_MIN = '2';
+    const send = (id: string) => from('7.7.7.7', '/api/conv/live/messages', msgBody({ clientMsgId: id }));
+    expect((await send('l0')).status).toBe(200);
+    expect((await send('l1')).status).toBe(200);
+    const over = await send('l2');
+    expect(over.status).toBe(429);
+    expect(((await over.json()) as { error: string }).error).toMatch(/2 messages per minute/);
+    getActor(db, 'live').append({
+      type: 'message_started',
+      messageId: 'a1',
+      agentId: 'maya',
+      turnId: 't',
+      hop: 0,
+      replyTo: null,
+      contextCutoffSeq: 0,
+      effort: 'low',
+    });
+    for (let i = 0; i < 6; i++) expect((await send(`s${i}`)).status).toBe(200);
+    expect((await send('s6')).status).toBe(429);
   });
 
   it('caps user messages per conversation (MAX_MESSAGES_PER_CONV)', async () => {
