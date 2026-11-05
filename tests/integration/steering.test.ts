@@ -187,6 +187,13 @@ describe('handleUserMessage: steering', () => {
     for (const id of ['maya', 'theo', 'priya'] as const) expect(startedBy(id)).toHaveLength(1);
   });
 
+  it('a steer asking for depth gets the room for it', async () => {
+    const g = start('maya');
+    const { settled } = await send('@Maya go deeper on that', { rendered: { [g.messageId]: 0 } });
+    await settled;
+    expect(g.effort).toBe('high');
+  });
+
   it('steer one by name, others continue', async () => {
     const g = startAll();
     await waitFor(() => g.theo.textSoFar().length > 0);

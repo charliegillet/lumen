@@ -244,6 +244,63 @@ describe('runTurn', () => {
     const plain = () => ({ chunks: ['An answer.'], delayMs: 2 });
     const whoSpoke = () => started().map((e) => [e.agentId, e.hop]);
 
+    it('an explicit depth request is high effort even when the named gate passes', async () => {
+      say('@Priya walk me through the runway in detail');
+      script({ gate: () => QUIET, reply: plain });
+      await runTurn(actor, { triggerMessageId: 'u2', forced: ['priya'] });
+      expect(started()[0]!.effort).toBe('high');
+    });
+
+    it('a plain question to a named agent stays medium when its gate passes', async () => {
+      say('@Priya how much runway do we have?');
+      script({ gate: () => QUIET, reply: plain });
+      await runTurn(actor, { triggerMessageId: 'u2', forced: ['priya'] });
+      expect(started()[0]!.effort).toBe('medium');
+    });
+
+    it('someone yet to answer with a figure nobody gave survives the repeat check and a low novelty', async () => {
+      say('Is a hiring freeze coming?');
+      script({
+        gate: (id, n) =>
+          id === 'priya' && n === 0
+            ? { should_respond: true, novelty: 3, gist: 'runway' }
+            : id === 'theo' && n === 1
+              ? { should_respond: true, novelty: 1, gist: 'Northwind is $480k and renews Mar 1' }
+              : QUIET,
+        reply: plain,
+        clusters: [['already_said' as AgentId, 'theo']],
+      });
+      await runTurn(actor, { triggerMessageId: 'u2', forced: [] });
+      expect(whoSpoke()).toEqual([['priya', 0], ['theo', 1]]);
+    });
+
+    it('someone who already answered does not come back on a repeat, figures or not', async () => {
+      say('Is a hiring freeze coming?');
+      script({
+        gate: (id, n) =>
+          id === 'priya' ? { should_respond: true, novelty: 3, gist: n === 0 ? 'runway' : 'also 42 days of slack' } : QUIET,
+        reply: plain,
+        clusters: [['already_said' as AgentId, 'priya']],
+      });
+      await runTurn(actor, { triggerMessageId: 'u2', forced: [] });
+      expect(whoSpoke()).toEqual([['priya', 0]]);
+    });
+
+    it('a bid aimed at someone who already answered does not bring them back', async () => {
+      say('Is a hiring freeze coming?');
+      script({
+        gate: (id, n) =>
+          id === 'priya' && n === 0
+            ? { should_respond: true, novelty: 3, gist: 'runway' }
+            : id === 'theo' && n === 1
+              ? { should_respond: true, novelty: 2, gist: 'the renewal decides it', addresses: ['priya'] }
+              : QUIET,
+        reply: plain,
+      });
+      await runTurn(actor, { triggerMessageId: 'u2', forced: [] });
+      expect(whoSpoke()).toEqual([['priya', 0], ['theo', 1]]);
+    });
+
     it('one name: only that agent speaks and the others are not even asked', async () => {
       script({ gate: eager(), reply: plain });
       say('@Theo what is the status');
