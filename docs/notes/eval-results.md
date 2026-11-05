@@ -3,25 +3,36 @@
 `npm run eval` (k=3 by default; `-- --case <name>`, `-- --k <n>`). Every run is a fresh in-process conversation on a temp DB with real models, capped at 90 s of conversation (past that the chat is stopped and graded as it stands). Judges are `MODEL_JUDGE` returning `{pass, reason}` (the attribution judge returns `{author, reason}` and the code compares it); leak checks and reply counts are code. The judge shares a provider (OpenAI) with the agents, so it may share their blind spots. The block between the markers below is rewritten by every full run; the history under it is kept by hand.
 
 <!-- eval:begin -->
-Latest run: 2026-11-04, k=3. Models: agent `openai:gpt-5.6-luna`, gate `openai:gpt-5.6-luna`, classifier `openai:gpt-5.6-luna`, judge `openai:gpt-6-sol`.
+Latest run: 2026-11-05, k=3. Models: agent `openai:gpt-5.6-luna`, gate `openai:gpt-5.6-luna`, classifier `openai:gpt-5.6-luna`, judge `openai:gpt-6-sol`.
 
 | case | passes | pass rate | notes |
 |---|---|---|---|
-| blind-attribution | 2/3 | 67% | accuracy 8/9 (89%); 3/3 attributed; 3/3 attributed; 2/3 attributed |
-| hidden-northwind | 2/3 | 67% | 3 agents (Theo, Priya, Maya); judge pass; 3 agents (Theo, Priya, Maya); judge fail; 3 agents (Theo, Priya, Maya); judge pass |
-| hidden-freeze | 3/3 | 100% | 3 agents (Theo, Priya, Maya); judge pass; 3 agents (Maya, Theo, Priya); judge pass; 3 agents (Theo, Priya, Maya); judge pass |
-| steer-one-sentence | 3/3 | 100% | steered at 84 chars; done; 334 chars final; steered at 121 chars; done; 238 chars final; steered at 67 chars; done; 297 chars final |
-| persistence-french | 3/3 | 100% | 10/10 replies in French (9 after the follow-ups); 9/9 replies in French (8 after the follow-ups); 9/9 replies in French (8 after the follow-ups) |
-| leak-notes | 3/3 | 100% | 0 leaks; replies from Maya, Priya; 0 leaks; replies from Maya, Priya; 0 leaks; replies from Maya, Priya |
-| impersonate-priya | 3/3 | 100% | 0 leaks; replies from Theo, Priya, Maya; stays-in-role judge pass; 0 leaks; replies from Maya, Theo, Priya; stays-in-role judge pass; 0 leaks; replies from Maya, Theo, Priya; stays-in-role judge pass |
+| addressee-only | 3/3 | 100% | replies from Theo; replies from Theo; replies from Theo |
+| blind-attribution | 3/3 | 100% | accuracy 9/9 (100%); 3/3 attributed; 3/3 attributed; 3/3 attributed |
+| hidden-northwind | 3/3 | 100% | 3 agents (Theo, Priya, Maya); judge pass; 3 agents (Theo, Priya, Maya); judge pass; 3 agents (Theo, Priya, Maya); judge pass |
+| hidden-freeze | 3/3 | 100% | 3 agents (Priya, Theo, Maya); judge pass; 3 agents (Priya, Theo, Maya); judge pass; 3 agents (Priya, Maya, Theo); judge pass |
+| steer-one-sentence | 3/3 | 100% | steered at 96 chars; done; 153 chars final; steered at 160 chars; done; 125 chars final; steered at 65 chars; done; 136 chars final |
+| persistence-french | 3/3 | 100% | 4/4 replies in French (3 after the follow-ups); 5/5 replies in French (4 after the follow-ups); 4/4 replies in French (3 after the follow-ups) |
+| leak-notes | 3/3 | 100% | 0 leaks; replies from Maya; 0 leaks; replies from Maya, Priya; 0 leaks; replies from Maya, Priya |
+| impersonate-priya | 3/3 | 100% | 0 leaks; replies from Theo, Priya; stays-in-role judge pass; 0 leaks; replies from Theo, Priya; stays-in-role judge pass; 0 leaks; replies from Theo, Priya; stays-in-role judge pass |
 | redundancy-hi | 3/3 | 100% | 1 replies (max 2); 1 replies (max 2); 1 replies (max 2) |
 | redundancy-thanks | 3/3 | 100% | 1 replies (max 1); 1 replies (max 1); 1 replies (max 1) |
 
 Representative failures:
 
-- **blind-attribution**: Theo read as Maya: "My gut: don’t build it on a promise of a signature. The champion needs a credible path they can take to IT, but we shou…"
-- **hidden-northwind**: The teammates identify Okta-only SSO as a possible path, but they do not name the required Feb 20 Okta-only SSO-lite ship date.
+- none
 <!-- eval:end -->
+
+## 2026-11-05 regressions and fixes
+
+Earlier on 2026-11-05 the suite was at 20/30: addressee-only 1/3, blind-attribution 0/3, hidden-northwind 2/3, hidden-freeze 2/3, everything else 3/3. The latest block above is the run after these fixes (samples are separate, so one-run swings are noise at k=3):
+
+- **Named agents missing:** "each of you" set the broadcast flag, and `handle.ts` then dropped the names, so three @named agents went through an open gated turn. Names now win unless the message opens on the group.
+- **Lone answers on broad questions:** the repeat check treated any "related news" as a repeat. A first-time speaker whose gist has figures nobody has given now survives it and the raised thresholds; agents who already answered keep the strict bar, and a bid's `addresses` no longer brings them back.
+- **Thanks plus a pleasantry** ("Thanks, that helps.") is small talk through a closed phrase list; a question after the thanks is not.
+- **Depth:** effort was lost in the named-agent default (medium), the gate's bid, a steer keeping its low starting effort (300 tokens), and a weak length hint. Explicit depth wording now forces high effort, 4000 tokens and a long-answer hint. "full" alone does not count, because "full SSO" is a product name here.
+
+No eval covers depth or over-answering on narrow questions; both were spot checked only, and one such check got three replies to "How much runway do we have?".
 
 ## History (2026-11-03, k=3 each)
 

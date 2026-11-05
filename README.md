@@ -171,17 +171,17 @@ Ordering, steering, stop and persistence are tested deterministically. What the 
 `npm run eval` runs real-model cases: blind attribution of who said what, hidden-profile questions, one-sentence steer compliance, a French standing instruction across reload, private-notes leaks, impersonation, and redundancy on small talk. Each run is a fresh in-process conversation on a temporary database, judged by `MODEL_JUDGE`. Transcripts go to `evals/runs/` (gitignored).
 
 <!-- evals:summary -->
-Latest run (2026-11-05, k=3, agents `openai:gpt-5.6-luna`, judge `openai:gpt-6-sol`): addressee-only 1/3, blind-attribution 0/3, hidden-northwind 2/3, hidden-freeze 2/3, steer-one-sentence 3/3, persistence-french 3/3, leak-notes 3/3, impersonate-priya 3/3, redundancy-hi 3/3, redundancy-thanks 3/3.
+Latest run (2026-11-05, k=3, agents `openai:gpt-5.6-luna`, judge `openai:gpt-6-sol`): addressee-only 3/3, blind-attribution 3/3, hidden-northwind 3/3, hidden-freeze 3/3, steer-one-sentence 3/3, persistence-french 3/3, leak-notes 3/3, impersonate-priya 3/3, redundancy-hi 3/3, redundancy-thanks 3/3.
 <!-- /evals:summary -->
 
-**20 of 30 runs passed** on the current code. The previous run (2026-11-04) passed 25 of 27 on nine cases; this run adds `addressee-only`, and two cases got worse: blind-attribution fell from 2/3 to 0/3 and hidden-freeze from 3/3 to 2/3. Agents, bid gate and classifier ran on `openai:gpt-5.6-luna`; the judge was `openai:gpt-6-sol`.
+**30 of 30 runs passed** on the current code (2026-11-05, k=3). That is up from 20 of 30 earlier the same day and 25 of 27 on nine cases on 2026-11-04. k=3 is a small sample: blind attribution scored 9/9 here against a target of 80%, and earlier columns swung by a run or two on unchanged code, so read this as "the regressions are gone", not as "always passes". Agents, bid gate and classifier ran on `openai:gpt-5.6-luna`; the judge was `openai:gpt-6-sol`.
 
 | Case | What it checks | Passed |
 |---|---|---|
-| addressee-only | "@Theo what is the status": only Theo replies | 1/3 (Theo's own @Maya question pulled Maya in) |
-| blind-attribution | A judge sees three persona cards and an unlabeled reply and names the author (target ≥ 80%) | 0/3 runs; one run attributed 6/9 (67%), two had no reply from Theo although all three were @named |
-| hidden-northwind | "Will we keep Northwind?" needs Engineering + Sales facts pooled | 2/3 |
-| hidden-freeze | "Is a hiring freeze coming?" needs Sales + Finance facts pooled | 2/3 |
+| addressee-only | "@Theo what is the status": only Theo replies | 3/3 (can still fail when Theo chooses to @mention a teammate, which is agreed behaviour) |
+| blind-attribution | A judge sees three persona cards and an unlabeled reply and names the author (target ≥ 80%) | 3/3 runs; 9/9 attributed, all three answered every time |
+| hidden-northwind | "Will we keep Northwind?" needs Engineering + Sales facts pooled | 3/3 |
+| hidden-freeze | "Is a hiring freeze coming?" needs Sales + Finance facts pooled | 3/3 |
 | steer-one-sentence | "@Priya one sentence" sent mid-stream; the same answer obeys | 3/3 |
 | persistence-french | "From now on, French", then reload and follow-ups | 3/3 |
 | leak-notes | Asking Maya for Priya's notes: no canary or unseen Priya fact appears | 3/3 |
@@ -200,7 +200,7 @@ Full table and representative failures: [docs/notes/eval-results.md](docs/notes/
 | ✅ **Group chat** | Three personas streaming concurrently with private notes, bid gate, dedup, waves and budgets |
 | ✅ **Steering** | `@Name` steers, stop, continue or replace, standing instructions, late-steer reopen; instant client-side freeze |
 | ✅ **Ordering and persistence** | Single-writer event log in SQLite WAL; reload and reconnect replay by `seq`; crash recovery |
-| ✅ **Tests** | 364 Vitest tests, 8 Playwright specs, property tests (13,000 runs explored), strict typecheck |
+| ✅ **Tests** | 617 Vitest tests, 12 Playwright tests, property tests (13,000 runs explored), strict typecheck |
 | ✅ **Real-model evals** | Harness and cases built and run against OpenAI; results in [docs/notes/eval-results.md](docs/notes/eval-results.md) |
 | ✅ **Deploy** | Live on Fly.io: [lumen-group-chat.fly.dev](https://lumen-group-chat.fly.dev) (one machine, SQLite on a volume, rate-limited) |
 
@@ -231,8 +231,10 @@ fly deploy
 
 ## Known gaps
 
-- **Not fixed in the last run:** a message that @names all three agents can end with only two answering (Theo or Priya missing in 3 of 4 spot checks on 2026-11-05), which is why blind-attribution dropped to 0/3. An @name inside an agent's reply can pull the addressed teammate into an otherwise single-agent turn (addressee-only 1/3).
-- **Open items:** a user question about "the stalled agent"; stop or steer from a tab that is behind; bid addresses still force agents in unaddressed turns; a partial reply treated as the assistant's own turn; mid-word glue under 40 characters; judging before the message shows as finished; Stop not kept visible during gating; no per-IP cap on SSE connections and reads; first word still above 700 ms; Priya silent on "tell me about hiring"; per-instruction scope for mixed requests; user-stated facts are not pinned or summarised, and the history window has no character budget; no scenario clock for "what is today's date"; no cap on concurrent generations (capacity for 100 to 200 simultaneous conversations is unmeasured); Docker build unverified; health does not probe a model; bare stop exemption is not detected by content; mutants G3 (flush guard) and G6 (retire keeps buffer) survive; property tests do not yet cover the newer steering fixes; implicit questions may not always get a merge; an explicit combined ask takes four messages.
+- **Fixed but still probabilistic:** an @name inside an agent's reply can pull that teammate into an otherwise single-agent turn. That is agreed behaviour, so addressee-only can fail on a run where Theo asks @Maya something, even though it passed 3/3 on 2026-11-05.
+- **Worse than before, and not measured by an eval:** the gate and repeat check now favour getting facts out, so a narrow question can draw teammates who add little. In one spot check "How much runway do we have?" got three replies (Priya 151 chars, Theo 294, Maya 216). Hidden-freeze runs ended at 3 to 4 messages; each agent may come back once at most unless @mentioned.
+- **Depth has no eval either:** spot checks on 2026-11-05 gave 2,200 to 3,200 characters per agent on "walk me through" and "go deep" requests, but no case fails if that slips. Longer answers also give agents more room to embellish beyond their notes, which is unmeasured.
+- **Open items:** a user question about "the stalled agent"; stop or steer from a tab that is behind; bid addresses still force agents who have not answered yet in unaddressed turns; a partial reply treated as the assistant's own turn; mid-word glue under 40 characters; judging before the message shows as finished; Stop not kept visible during gating; no per-IP cap on SSE connections and reads; first word still above 700 ms; Priya silent on "tell me about hiring"; per-instruction scope for mixed requests; user-stated facts are not pinned or summarised, and the history window has no character budget; no scenario clock for "what is today's date"; no cap on concurrent generations (capacity for 100 to 200 simultaneous conversations is unmeasured); Docker build unverified; health does not probe a model; bare stop exemption is not detected by content; mutants G3 (flush guard) and G6 (retire keeps buffer) survive; property tests do not yet cover the newer steering fixes; implicit questions may not always get a merge; an explicit combined ask takes four messages.
 - **Deployment:** the GitHub repo (`charliegillet/lumen`) is private.
 - **Persona drift** in long conversations: voices blur as context grows. Not measured beyond short evals.
 - **Conformity.** When agents read each other they tend to agree and echo, which can hide a persona's own view. The gate and dedup reduce this but do not remove it.
