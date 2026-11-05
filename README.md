@@ -147,7 +147,7 @@ MODEL_JUDGE=openai:gpt-6-sol
 
 | Check | Result |
 |---|---|
-| `npm test`: unit, integration and property suites, all against a scripted fake LLM so races are reproducible | **566 passed** in 19 files, ~35 s |
+| `npm test`: unit, integration and property suites, all against a scripted fake LLM so races are reproducible | **617 passed** in 19 files, ~35 s |
 | `npm run test:e2e`: Playwright against the real built server in fake mode, Chromium (stream, typing dots, steer, stop, reload mid-stream and after, standing instruction across reload, no internals in the UI) | **12 of 12 passed**, ~54 s |
 | Property tests: fast-check over random interleavings of sends, steers, stops, reloads, token arrival and 75 ms flush timers, with fake timers | **100 runs** per `npm test`; **1,000 runs** passed with `PROPERTY_RUNS=1000` (~31 s) |
 | `npm run typecheck` (strict) | clean |
