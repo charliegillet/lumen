@@ -6,6 +6,7 @@ import { MIN_RESTORE_CHARS, type ConversationActor } from '../actor.js';
 import { buildPromptFromView, type PromptMode } from '../agents/prompt.js';
 import { modelSpec } from '../llm/registry.js';
 import { streamChat } from '../llm/stream.js';
+import { asksForDepth } from './smalltalk.js';
 
 export const FLUSH_MS = 75;
 /** Continue mode buffers this many leading chars to detect a repeated tail. */
@@ -143,7 +144,7 @@ export class Generation {
     this.messageId = r.messageId;
     this.agentId = r.agentId;
     this.hop = r.hop;
-    this.effort = r.effort;
+    this.effort = deepened(r.effort, r.steers);
     this.triggerSeq = undefined;
     this.segment = r.segment;
     const previous = actor.view.messages.find((m) => m.id === r.messageId)?.text ?? '';
@@ -200,6 +201,7 @@ export class Generation {
     // Keeps what it cuts, or what an earlier rewrite that barely wrote had cut.
     const restore = committed.length * 2 >= this.current.restore.length ? committed : this.current.restore;
     this.retire(this.current); // unflushed text was never visible: drop it
+    this.effort = deepened(this.effort, steers);
 
     this.segment += 1;
     this.firstTokenSeen = false;
@@ -451,6 +453,9 @@ export class Generation {
     this.resolveDone(o); // later calls are no-ops on a settled promise
   }
 }
+
+/** A steer asking for depth needs the room for it, whatever the message started with. */
+const deepened = (effort: Effort, steers: string[]): Effort => (asksForDepth(steers.join(' ')) ? 'high' : effort);
 
 function newSegment(segment: number, partial: string, restore: string, moved: boolean): Segment {
   return {

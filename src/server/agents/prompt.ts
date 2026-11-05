@@ -1,6 +1,7 @@
 import type { ModelMessage } from 'ai';
 import type { AgentId, ConvEvent, Effort } from '../../shared/events.js';
 import { fold, visibleMessages, type ConversationView, type MessageView } from '../../shared/reducer.js';
+import { asksForDepth } from '../orchestrator/smalltalk.js';
 import { EFFORT } from '../llm/stream.js';
 import { AGENT_IDS, PERSONAS, type Persona } from './personas.js';
 
@@ -188,6 +189,9 @@ function joinNames(names: string[]): string {
   return `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`;
 }
 
+/** A steer's wording decides length, so only a steer that asks for depth gets the long hint. */
+const depthHint = (steers: string[]) => (asksForDepth(steers.join(' ')) ? ` ${EFFORT.high.lengthHint}` : '');
+
 function finalBlock(p: Persona, mode: PromptMode): string {
   switch (mode.kind) {
     case 'gate':
@@ -209,12 +213,17 @@ function finalBlock(p: Persona, mode: PromptMode): string {
         '- novelty: integer 0–3, how much new information your message would add',
         '- gist: what you would say, at most 200 characters',
         `- addresses: array of who your message is aimed at, each one of 'maya', 'theo', 'priya', 'user'`,
-        `- effort: 'low', 'medium' or 'high', how much length the message deserves`,
+        `- effort: 'low', 'medium' or 'high', how much length the message deserves; 'high' only when the person explicitly asks for depth`,
       ].join('\n');
     case 'reply': {
       const others = mode.othersReplying.filter((id) => id !== p.id).map(nameOf);
       // A forced agent (mentioned, no bid) has no gist.
-      const ask = mode.gist.trim() === '' ? 'Respond to the message that addressed you.' : `The point to cover: «${mode.gist}».`;
+      const ask =
+        mode.gist.trim() === ''
+          ? 'Respond to the message that addressed you.'
+          : mode.effort === 'high'
+            ? `Start from this point, then answer everything the person asked from your side: «${mode.gist}».`
+            : `The point to cover: «${mode.gist}».`;
       const lines = [`Write your next message in the chat. ${ask}`];
       if (others.length > 0) {
         lines.push(
@@ -227,11 +236,11 @@ function finalBlock(p: Persona, mode: PromptMode): string {
     }
     case 'continue':
       return [
-        `Your message was cut off here: «${mode.partial}». The person just said: «${mode.steers.join(' / ')}». Continue from exactly where it stops, output only the new text, and follow what they said. Their wording about length or depth wins over your usual style. Do not repeat or rephrase anything you already wrote.`,
+        `Your message was cut off here: «${mode.partial}». The person just said: «${mode.steers.join(' / ')}». Continue from exactly where it stops, output only the new text, and follow what they said. Their wording about length or depth wins over your usual style. Do not repeat or rephrase anything you already wrote.${depthHint(mode.steers)}`,
       ].join('\n');
     case 'replace':
       return [
-        `Rewrite your reply from scratch following: «${mode.steers.join(' / ')}». Keep covering only your own point from the earlier question. Their wording about length or depth wins over your usual style; "one sentence" means one short sentence of about 30 words at most.`,
+        `Rewrite your reply from scratch following: «${mode.steers.join(' / ')}». Keep covering only your own point from the earlier question. Their wording about length or depth wins over your usual style; "one sentence" means one short sentence of about 30 words at most.${depthHint(mode.steers)}`,
       ].join('\n');
   }
 }

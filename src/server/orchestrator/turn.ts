@@ -5,7 +5,7 @@ import type { ConversationActor } from '../actor.js';
 import { AGENT_IDS } from '../agents/personas.js';
 import { clusterGists, findRepeats, hasNewFigures, noveltyThreshold, selectSpeakers } from './dedup.js';
 import { isFailedBid, markFailedBid, runGate, type Bid } from './gate.js';
-import { smallTalkKind } from './smalltalk.js';
+import { asksForDepth, smallTalkKind } from './smalltalk.js';
 import { startGeneration, type Generation } from './generation.js';
 
 export const BUDGET = { maxAgentMessages: 7, maxHops: 3, turnTimeoutMs: 90_000 };
@@ -118,6 +118,7 @@ async function waves(actor: ConversationActor, a: TurnArgs, signal: AbortSignal)
   const addressed = a.forced.length > 0;
   const lastHop = addr.only || addr.justOne ? 0 : BUDGET.maxHops;
   const planned = !light && (addr.debate || addr.joint);
+  const deep = !light && asksForDepth(text);
 
   let hop = 0;
   let forced: AgentId[] = askEveryone ? [...AGENT_IDS] : [...new Set(a.forced)];
@@ -197,9 +198,11 @@ async function waves(actor: ConversationActor, a: TurnArgs, signal: AbortSignal)
     };
     const shape = (s: Speaker, fallback: boolean): Speaker => {
       if (a.ack) return { ...s, effort: 'low', gist: ACK };
-      if (light || fallback) return { ...s, effort: 'low', gist: FEW_WORDS };
+      if (light || (fallback && !deep)) return { ...s, effort: 'low', gist: FEW_WORDS };
       if (step !== null) return { ...s, effort: step.effort, gist: step.gist };
       const bid = bids.find((b) => b.agentId === s.agentId);
+      // Depth was asked for in words: no bid, late gate or reluctant gate takes it away from a first answer.
+      if (deep && !spokeThisTurn.has(s.agentId)) return { ...s, effort: 'high', gist: bid?.should_respond ? s.gist : '' };
       // Nothing to read at a later hop: a pulled-in teammate answers briefly.
       if (!bid) return { ...s, effort: 'low' };
       // A named agent speaks even if its gate would not have; it has no point of its own to cover.
@@ -214,7 +217,7 @@ async function waves(actor: ConversationActor, a: TurnArgs, signal: AbortSignal)
       // No gate could be reached: nobody declined, so this is not "nobody cares".
       const picked = AGENT_IDS.filter((id) => DOMAIN[id].test(text) && asked.includes(id));
       const pool = picked.length > 0 ? picked : asked;
-      speakers = pool.map((agentId) => ({ agentId, effort: light ? 'low' : 'medium', gist: '' }));
+      speakers = pool.map((agentId) => ({ agentId, effort: light ? 'low' : deep ? 'high' : 'medium', gist: '' }));
     } else {
       const threshold = noveltyThreshold(hop);
       const eligible = open.filter((b) => b.should_respond && b.novelty >= threshold && !excluded.includes(b.agentId));
@@ -272,7 +275,7 @@ async function waves(actor: ConversationActor, a: TurnArgs, signal: AbortSignal)
     hop++;
 
     if (planned) {
-      step = planStep(hop, firstWave, addr.joint, text);
+      step = planStep(hop, firstWave, addr.joint, text, deep);
       if (!step) return;
       forced = step.forced;
     } else {
@@ -288,7 +291,7 @@ interface PlanStep {
 }
 
 /** A debate reacts, then closes; a request for one answer gets one reaction, then the answer. */
-function planStep(hop: number, first: AgentId[], joint: boolean, text: string): PlanStep | null {
+function planStep(hop: number, first: AgentId[], joint: boolean, text: string, deep: boolean): PlanStep | null {
   const opener = first[0];
   if (opener === undefined) return null;
   if (hop === 1) {
@@ -298,7 +301,7 @@ function planStep(hop: number, first: AgentId[], joint: boolean, text: string): 
     const reactors = first.length < 2 ? [partner] : joint ? [first.at(-1)!] : first;
     return { forced: reactors, gist: joint ? REACT_JOINT : REACT, effort: 'low' };
   }
-  if (hop === 2) return { forced: [opener], gist: joint ? CLOSE_JOINT : CLOSE_DEBATE, effort: joint ? 'medium' : 'low' };
+  if (hop === 2) return { forced: [opener], gist: joint ? CLOSE_JOINT : CLOSE_DEBATE, effort: joint ? (deep ? 'high' : 'medium') : 'low' };
   return null;
 }
 

@@ -9,7 +9,12 @@ export const EFFORT: Record<
 > = {
   low: { reasoning: 'none', maxOutputTokens: 300, lengthHint: 'Reply in one or two sentences.' },
   medium: { reasoning: 'low', maxOutputTokens: 900, lengthHint: 'Reply in a short paragraph.' },
-  high: { reasoning: 'medium', maxOutputTokens: 3000, lengthHint: 'Give a thorough answer.' },
+  high: {
+    reasoning: 'medium',
+    maxOutputTokens: 4000, // reasoning spends from this too
+    lengthHint:
+      'The person asked for depth, and that overrides your usual brevity. Write a long, complete answer of several paragraphs, at least 250 words (well over 1500 characters), covering every part of what they asked and each scenario, assumption and trade-off you can reason through from your notes. Use only facts from your notes and the chat; where you lack one, say what you would need rather than inventing it.',
+  },
 };
 
 type Reasoning = 'none' | 'low' | 'medium';
