@@ -56,23 +56,19 @@ const pending = new WeakMap<Generation, Pending>();
 /** One compliance check per generation, shared by every steer that hit it. */
 const judged = new WeakMap<Generation, Promise<void>>();
 /**
- * Stop stamps: the seq of the latest stop_all, and per agent the seq of the
- * latest stop that hit it. Queued work (a forced reply after waiting, a reopen,
- * a compliance redo) never starts an agent stopped after its trigger.
+ * Stop stamps: the seq of the latest stop_all here, and per agent on the actor.
+ * Queued work (a forced reply after waiting, a reopen, a compliance redo) never
+ * starts an agent stopped after its trigger.
  */
-interface Stops {
-  all: number;
-  agent: Map<AgentId, number>;
-}
-const stopsOf = new WeakMap<ConversationActor, Stops>();
-function stops(a: ConversationActor): Stops {
-  let s = stopsOf.get(a);
-  if (!s) stopsOf.set(a, (s = { all: 0, agent: new Map() }));
+const stopAllOf = new WeakMap<ConversationActor, { all: number }>();
+function stops(a: ConversationActor): { all: number } {
+  let s = stopAllOf.get(a);
+  if (!s) stopAllOf.set(a, (s = { all: 0 }));
   return s;
 }
 const stoppedAllSince = (a: ConversationActor, seq: number) => stops(a).all > seq;
 const stoppedSince = (a: ConversationActor, id: AgentId, seq: number) =>
-  stoppedAllSince(a, seq) || (stops(a).agent.get(id) ?? 0) > seq;
+  stoppedAllSince(a, seq) || (a.agentStops.get(id) ?? 0) > seq;
 /** User messages still waiting for their steer_resolved: messageId -> seq. */
 const unresolvedOf = new WeakMap<ConversationActor, Map<string, number>>();
 function unresolved(a: ConversationActor): Map<string, number> {
@@ -744,8 +740,7 @@ function stopAt(
   } catch (err) {
     console.warn(`generation ${g.messageId}: stop failed`, err); // stop() still ends it
   } finally {
-    const agent = stops(actor).agent;
-    agent.set(g.agentId, Math.max(agent.get(g.agentId) ?? 0, stampSeq ?? actor.lastSeq));
+    actor.agentStops.set(g.agentId, Math.max(actor.agentStops.get(g.agentId) ?? 0, stampSeq ?? actor.lastSeq));
   }
 }
 

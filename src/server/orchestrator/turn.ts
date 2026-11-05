@@ -166,6 +166,8 @@ async function waves(actor: ConversationActor, a: TurnArgs, signal: AbortSignal)
     const wave: WaveEntry[] = [];
     const launch = (s: Speaker, others: AgentId[]) => {
       if (liveAgents(actor).has(s.agentId) || steeredSince(actor, s.agentId, cutoff)) return;
+      // The person stopped this agent after asking: a teammate's @mention does not bring it back.
+      if ((actor.agentStops.get(s.agentId) ?? 0) > (trigger?.startSeq ?? 0)) return;
       try {
         const gen = startGeneration(actor, {
           agentId: s.agentId,

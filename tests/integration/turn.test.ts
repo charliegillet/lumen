@@ -625,6 +625,26 @@ describe('runTurn', () => {
     });
   });
 
+  describe('a stop aimed at one agent', () => {
+    it('holds for the rest of the turn: a mention does not bring the agent back', async () => {
+      script({
+        gate: (id, n) => (n === 0 && id === 'priya' ? { should_respond: true, novelty: 2, gist: 'x' } : QUIET),
+        reply: () => ({ chunks: ['@Maya when can it ship?'], delayMs: 2 }),
+      });
+      actor.agentStops.set('maya', actor.lastSeq + 1);
+      await runTurn(actor, { triggerMessageId: 'u1', forced: [] });
+      expect(started().map((e) => e.agentId)).toEqual(['priya']);
+    });
+
+    it('does not bar the agent from the next question', async () => {
+      script({ gate: () => QUIET, reply: () => ({ chunks: ['Ok.'], delayMs: 2 }) });
+      actor.agentStops.set('maya', actor.lastSeq);
+      actor.append({ type: 'user_message', messageId: 'u2', clientMsgId: 'cm2', text: '@Maya when can it ship?' });
+      await runTurn(actor, { triggerMessageId: 'u2', forced: ['maya'] });
+      expect(started().map((e) => e.agentId)).toEqual(['maya']);
+    });
+  });
+
   describe('steers and later waves', () => {
     it('a forced wave skips an agent a steer just reopened', async () => {
       let gateN = 0;

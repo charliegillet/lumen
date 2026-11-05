@@ -1,4 +1,4 @@
-import type { ConvEvent, EventBody } from '../shared/events.js';
+import type { AgentId, ConvEvent, EventBody } from '../shared/events.js';
 import { applyEvent, emptyView, fold, type ConversationView } from '../shared/reducer.js';
 import type { Db } from './db.js';
 import type { Generation } from './orchestrator/generation.js';
@@ -19,6 +19,8 @@ export class ConversationActor {
   turnAbort: AbortController | null = null;
   /** Seq of the message the running turn answers. Meaningful while turnAbort is set. */
   turnTriggerSeq = 0;
+  /** Per agent, the seq of the latest stop that hit it; queued work started before it does not bring the agent back. */
+  readonly agentStops = new Map<AgentId, number>();
   /** User messages the previous process died before deciding. */
   readonly undecidedAtBoot: { messageId: string; clientMsgId: string; text: string; seq: number; at: number }[] = [];
 
