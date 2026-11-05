@@ -24,9 +24,11 @@ const FEW_WORDS = 'Answer in a few words. No work update, no new facts, no quest
 const ACK = 'Acknowledge what the person asked for in a few words, already doing it. No work update, no question back, no @mention.';
 const REACT =
   'React directly to what your teammates just said: say where you disagree and why, with a fact only you hold. No recap.';
+const REACT_JOINT =
+  'Read what your teammates just said and say what it changes in your answer, using their facts by name and adding what only you hold. No recap.';
 const CLOSE_DEBATE = 'Close this out: say where you landed or what still splits you, in a sentence or two. No @mentions, no questions.';
 const CLOSE_JOINT =
-  'Give the person the one joint recommendation the group lands on, drawing on what everyone said. One clear call. No @mentions, no questions.';
+  'Give the person the one joint recommendation the group lands on, putting the specific facts each of you gave together into an answer none of you could give alone. One clear call. No @mentions, no questions.';
 
 /** Who to ask when no gate could be reached at all: whoever the words point at. */
 const DOMAIN: Record<AgentId, RegExp> = {
@@ -127,6 +129,7 @@ async function waves(actor: ConversationActor, a: TurnArgs, signal: AbortSignal)
   let started = 0;
   let step: PlanStep | null = null;
   const said: string[] = [];
+  const spokeThisTurn = new Set<AgentId>();
   /** Asked this question already and passed; only asked again if nobody else turns up. */
   const passed = new Set<AgentId>();
 
@@ -134,7 +137,8 @@ async function waves(actor: ConversationActor, a: TurnArgs, signal: AbortSignal)
     const live = liveAgents(actor);
     // Forced agents already speaking are skipped for this wave, not queued.
     const forcedNow = forced.filter((id) => !live.has(id));
-    const excluded = excludedAt(hop, addressed, lastSpoken);
+    // Past the one comeback at hop 1, nobody who has spoken this turn returns unless pulled in.
+    const excluded = [...new Set([...excludedAt(hop, addressed, lastSpoken), ...(hop > 1 ? spokeThisTurn : [])])];
     const candidates =
       addressed || step !== null
         ? []
@@ -258,6 +262,7 @@ async function waves(actor: ConversationActor, a: TurnArgs, signal: AbortSignal)
 
     for (const s of lastSpoken) if (s.text) said.push(s.text.slice(0, SAID_CHARS));
     lastWave = wave.map((w) => w.gen.agentId);
+    lastWave.forEach((id) => spokeThisTurn.add(id));
     if (hop === 0) firstWave = lastWave;
     hop++;
 
@@ -286,7 +291,7 @@ function planStep(hop: number, first: AgentId[], joint: boolean, text: string): 
     const others = AGENT_IDS.filter((id) => !first.includes(id));
     const partner = others.find((id) => new RegExp(`\\b${id}\\b`, 'i').test(text)) ?? others[0] ?? opener;
     const reactors = first.length < 2 ? [partner] : joint ? [first.at(-1)!] : first;
-    return { forced: reactors, gist: REACT, effort: 'low' };
+    return { forced: reactors, gist: joint ? REACT_JOINT : REACT, effort: 'low' };
   }
   if (hop === 2) return { forced: [opener], gist: joint ? CLOSE_JOINT : CLOSE_DEBATE, effort: joint ? 'medium' : 'low' };
   return null;

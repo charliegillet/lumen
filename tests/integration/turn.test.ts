@@ -562,6 +562,27 @@ describe('runTurn', () => {
       expect(fakeRequests.findLast((r) => r.kind === 'reply')?.prompt).toContain('joint recommendation');
     });
 
+    it('two agents asked to combine what they know build on each other, then one lands it', async () => {
+      script({ gate: allKeen, reply: said });
+      say('Can we afford two more engineers? Need Maya and Priya combined.');
+      await runTurn(actor, { triggerMessageId: 'u2', forced: ['maya', 'priya'] });
+      expect(hopsBy()).toEqual(['maya@0', 'priya@0', 'priya@1', 'maya@2']);
+      const replies = fakeRequests.filter((r) => r.kind === 'reply');
+      expect(replies[2]?.prompt).toContain('what it changes in your answer');
+      expect(replies[3]?.prompt).toContain('joint recommendation');
+    });
+
+    it('after one comeback lands an answer, nobody who already spoke returns on their own', async () => {
+      script({
+        gate: (id, n) => (n === 2 && id === 'priya' ? QUIET : { should_respond: true, novelty: 3, gist: `${id} view ${n}` }),
+        reply: said,
+      });
+      say('Can we afford two more engineers and still hit the date?');
+      await runTurn(actor, { triggerMessageId: 'u2', forced: [] });
+      expect(started().filter((e) => e.hop === 1)).toHaveLength(1);
+      expect(started().filter((e) => e.hop >= 2)).toHaveLength(0);
+    });
+
     it('a lone debater gets the partner the person named', async () => {
       script({ gate: allKeen, reply: said });
       say('Maya, debate this with Priya: hire now?');
