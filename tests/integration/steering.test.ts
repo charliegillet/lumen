@@ -1212,6 +1212,20 @@ describe('size limits', () => {
   });
 });
 
+describe('a message for everyone', () => {
+  it('waits for whoever is still writing, then all three answer it', async () => {
+    const maya = start('maya');
+    await waitFor(() => maya.textSoFar().length > 0);
+    const r = await send('Everyone: what is your one-line take?');
+    await r.settled;
+    await idle();
+    expect(startedBy('maya')).toHaveLength(2);
+    expect(startedBy('theo')).toHaveLength(1);
+    expect(startedBy('priya')).toHaveLength(1);
+    expect(msg(maya.messageId)).toMatchObject({ status: 'done' });
+  });
+});
+
 describe('steers show up fast', () => {
   it('an @named steer restarts the agent before the classifier answers', async () => {
     let release!: () => void;

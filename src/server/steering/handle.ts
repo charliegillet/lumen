@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import type { AgentId } from '../../shared/events.js';
 import type { MessageView } from '../../shared/reducer.js';
-import { dropsTopic, parseResume, parseTargets } from '../../shared/targets.js';
+import { dropsTopic, parseAddressing, parseResume, parseTargets } from '../../shared/targets.js';
 import { setActorLoader, type ConversationActor } from '../actor.js';
 import { AGENT_IDS } from '../agents/personas.js';
 import { generateStructured } from '../llm/stream.js';
@@ -322,8 +322,10 @@ async function handle(
     if (named0.length > 0 && forced.length === 0) return;
     const live = [...actor.generations.values()];
     const busy = forced.length > 0 ? live.filter((g) => forced.includes(g.agentId)) : live;
+    // "Everyone: ..." is owed by whoever is still writing too, once they finish.
+    const owedByAll = parseAddressing(i.text).everyone;
     const mustWait =
-      forced.length > 0 ? busy.length > 0 : AGENT_IDS.every((id) => live.some((g) => g.agentId === id));
+      forced.length > 0 || owedByAll ? busy.length > 0 : AGENT_IDS.every((id) => live.some((g) => g.agentId === id));
     // Setting or lifting an instruction is not a question: one short nod, unless it asks something too.
     const ack =
       (d.scope === 'standing' || d.revokes.length > 0) && !regex.broadcast && !i.text.includes('?');
