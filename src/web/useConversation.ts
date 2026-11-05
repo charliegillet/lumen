@@ -484,11 +484,15 @@ function uuid(): string {
   });
 }
 
+/** A POST that has not answered by now counts as failed. */
+const POST_TIMEOUT_MS = 20_000;
+
 async function postJson(url: string, body: unknown): Promise<unknown> {
   const res = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
+    signal: AbortSignal.timeout(POST_TIMEOUT_MS),
   });
   if (!res.ok) throw new Error(`${url}: ${res.status}`);
   return res.json();
@@ -515,7 +519,11 @@ export function useConversation(id: string): Conversation {
   const [loaded, setLoaded] = useState(false);
   const frame = useRef<number | null>(null);
   const lastFrameAt = useRef<number | null>(null);
-  const sendInfo = useRef(new Map<string, { text: string; typingStartedAt: number | null; rendered: Record<string, number> }>());
+  const sendInfo = useRef(
+    new Map<string, { text: string; typingStartedAt: number | null; rendered: Record<string, number>; froze: string[] }>(),
+  );
+  // Sends go out one at a time, in the order typed; the bubble and freeze are instant.
+  const postChain = useRef<Promise<void>>(Promise.resolve());
 
   const schedule = useCallback(() => {
     if (frame.current !== null) return;
@@ -670,13 +678,18 @@ export function useConversation(id: string): Conversation {
     (clientMsgId: string) => {
       const info = sendInfo.current.get(clientMsgId);
       if (!info) return;
-      // sentAt lets the server map typingStartedAt onto its own clock.
-      postJson(`${base}/messages`, { clientMsgId, ...info, sentAt: Date.now() })
-        .then((r) => {
+      postChain.current = postChain.current.then(async () => {
+        try {
+          // sentAt lets the server map typingStartedAt onto its own clock.
+          const { froze: _froze, ...body } = info;
+          const r = await postJson(`${base}/messages`, { clientMsgId, ...body, sentAt: Date.now() });
           const seq = (r as { seq?: unknown }).seq;
           if (typeof seq === 'number') update((s) => ackPending(s, clientMsgId, seq));
-        })
-        .catch(() => update((s) => failPending(s, clientMsgId, true), true));
+        } catch {
+          // Nothing will resolve this send, so what it froze is released too.
+          update((s) => unfreeze(failPending(s, clientMsgId, true), info.froze), true);
+        }
+      });
     },
     [base, update],
   );
@@ -687,8 +700,10 @@ export function useConversation(id: string): Conversation {
       if (text === '') return;
       const clientMsgId = uuid();
       // Rendered now, so what is frozen is exactly what is on screen.
+      const before = latest.current;
       const after = update((s) => freezeFor(addPending(s, clientMsgId, text), text), true);
-      sendInfo.current.set(clientMsgId, { text, typingStartedAt, rendered: renderedCounts(after) });
+      const froze = [...after.frozen.keys()].filter((k) => !before.frozen.has(k));
+      sendInfo.current.set(clientMsgId, { text, typingStartedAt, rendered: renderedCounts(after), froze });
       post(clientMsgId);
     },
     [post, update],
@@ -696,7 +711,17 @@ export function useConversation(id: string): Conversation {
 
   const retry = useCallback(
     (clientMsgId: string) => {
-      update((s) => failPending(s, clientMsgId, false), true);
+      const info = sendInfo.current.get(clientMsgId);
+      if (!info) return;
+      // What is on screen now, not what was when it first failed.
+      const before = latest.current;
+      const after = update((s) => freezeFor(failPending(s, clientMsgId, false), info.text), true);
+      sendInfo.current.set(clientMsgId, {
+        text: info.text,
+        typingStartedAt: null,
+        rendered: renderedCounts(after),
+        froze: [...after.frozen.keys()].filter((k) => !before.frozen.has(k)),
+      });
       post(clientMsgId);
     },
     [post, update],
