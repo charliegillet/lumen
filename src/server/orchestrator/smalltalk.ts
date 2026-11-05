@@ -22,6 +22,8 @@ export function smallTalkKind(text: string): SmallTalk | null {
     .filter(Boolean);
   // Peel trailing address words, then match what is left as one phrase.
   while (words.length > 1 && ADDRESS.test(words[words.length - 1]!)) words.pop();
+  const group = /\s(?:all of you|both of you|each of you|you all|y'all|all three of you|all three)$/.exec(words.join(' '));
+  if (group) words.length -= group[0].trim().split(' ').length;
   const phrase = words.join(' ');
   if (THANKS.test(phrase)) return 'thanks';
   if (ACK.test(phrase)) return 'ack';

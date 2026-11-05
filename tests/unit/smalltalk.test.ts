@@ -24,6 +24,8 @@ describe('isSmallTalk', () => {
     ['haha', 'ack'],
     ['👍', 'ack'],
     ['nice 🎉', 'ack'],
+    ['hey all of you', 'greeting'],
+    ['thanks both of you', 'thanks'],
   ])('%j is small talk (%s)', (text, kind) => {
     expect(isSmallTalk(text)).toBe(true);
     expect(smallTalkKind(text)).toBe(kind);
