@@ -222,7 +222,24 @@ function redundancy(name: string, setup: string | null, text: string, max: numbe
 const redundancyHi = redundancy('redundancy-hi', null, 'Hi all!', 2);
 const redundancyThanks = redundancy('redundancy-thanks', '@Maya when does full SSO ship?', 'Thanks!', 1);
 
+const addressee: Case = {
+  name: 'addressee-only',
+  async run(ctx) {
+    const c = ctx.chat();
+    await c.say('@Theo what is the status');
+    const speakers = distinctAgents(c);
+    const bad = [...speakers].filter((id) => id !== 'theo');
+    const pass = speakers.has('theo') && bad.length === 0;
+    return {
+      pass,
+      note: `replies from ${names(speakers) || 'nobody'}`,
+      failure: pass ? undefined : `expected only Theo, got ${names(speakers) || 'nobody'}`,
+    };
+  },
+};
+
 export const CASES: Case[] = [
+  addressee,
   blindAttribution,
   hiddenNorthwind,
   hiddenFreeze,
