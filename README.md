@@ -200,7 +200,7 @@ Full table and representative failures: [docs/notes/eval-results.md](docs/notes/
 | ✅ **Group chat** | Three personas streaming concurrently with private notes, bid gate, dedup, waves and budgets |
 | ✅ **Steering** | `@Name` steers, stop, continue or replace, standing instructions, late-steer reopen; instant client-side freeze |
 | ✅ **Ordering and persistence** | Single-writer event log in SQLite WAL; reload and reconnect replay by `seq`; crash recovery |
-| ✅ **Tests** | 617 Vitest tests, 12 Playwright tests, property tests (13,000 runs explored), strict typecheck |
+| ✅ **Tests** | 617 Vitest tests, 12 Playwright tests, property tests (1,000 runs on the final code), strict typecheck |
 | ✅ **Real-model evals** | Harness and cases built and run against OpenAI; results in [docs/notes/eval-results.md](docs/notes/eval-results.md) |
 | ✅ **Deploy** | Live on Fly.io: [lumen-group-chat.fly.dev](https://lumen-group-chat.fly.dev) (one machine, SQLite on a volume, rate-limited) |
 
