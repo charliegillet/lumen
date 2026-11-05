@@ -127,6 +127,8 @@ async function waves(actor: ConversationActor, a: TurnArgs, signal: AbortSignal)
   let started = 0;
   let step: PlanStep | null = null;
   const said: string[] = [];
+  /** Asked this question already and passed; only asked again if nobody else turns up. */
+  const passed = new Set<AgentId>();
 
   while (hop <= lastHop && started < BUDGET.maxAgentMessages && inTime() && !signal.aborted) {
     const live = liveAgents(actor);
@@ -136,7 +138,7 @@ async function waves(actor: ConversationActor, a: TurnArgs, signal: AbortSignal)
     const candidates =
       addressed || step !== null
         ? []
-        : AGENT_IDS.filter((id) => !live.has(id) && !forced.includes(id) && !excluded.includes(id));
+        : AGENT_IDS.filter((id) => !live.has(id) && !forced.includes(id) && !excluded.includes(id) && !passed.has(id));
     // In wave 0 a forced agent bids too: its bid says how much the question deserves.
     const asked = hop === 0 ? [...candidates, ...forcedNow] : candidates;
 
@@ -146,6 +148,17 @@ async function waves(actor: ConversationActor, a: TurnArgs, signal: AbortSignal)
     const repeats = hop > 0 ? await findRepeats(raw, said, text, cappedDedup(signal)) : new Set<AgentId>();
     if (signal.aborted) return;
     const bids = raw.map((b) => (repeats.has(b.agentId) ? { ...b, should_respond: false } : b));
+
+    // Everyone free passed, but the words point at someone still writing: they
+    // get to answer before a teammate is pushed to say "I don't know".
+    const someoneWilling = bids.some((b) => b.should_respond && b.novelty >= noveltyThreshold(hop));
+    const owners = [...actor.generations.values()].filter((g) => DOMAIN[g.agentId].test(text));
+    if (hop === 0 && forcedNow.length === 0 && !light && step === null && !someoneWilling && owners.length > 0) {
+      asked.forEach((id) => passed.add(id));
+      await untilDone(owners, signal);
+      if (signal.aborted) return;
+      continue;
+    }
 
     const room = Math.min(BUDGET.maxAgentMessages, smallCap) - started;
     const open = bids.filter((b) => !forcedNow.includes(b.agentId));
@@ -285,6 +298,18 @@ async function settle(actor: ConversationActor, wave: WaveEntry[]): Promise<void
     return g ? [g.done] : [];
   });
   if (reopened.length > 0) await Promise.allSettled(reopened);
+}
+
+/** Waits for these streams to end, or for the turn to be called off. */
+async function untilDone(gens: Generation[], signal: AbortSignal): Promise<void> {
+  let wake!: () => void;
+  const aborted = new Promise<void>((r) => (wake = r));
+  signal.addEventListener('abort', wake, { once: true });
+  try {
+    await Promise.race([Promise.allSettled(gens.map((g) => g.done)), aborted]);
+  } finally {
+    signal.removeEventListener('abort', wake);
+  }
 }
 
 const liveAgents = (actor: ConversationActor) => new Set([...actor.generations.values()].map((g) => g.agentId));

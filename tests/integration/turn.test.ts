@@ -3,7 +3,7 @@ import { openDb, type Db } from '../../src/server/db.js';
 import { ConversationActor } from '../../src/server/actor.js';
 import { fakeRequests, resetFake, setFakeScript, type FakeReply } from '../../src/server/llm/fake.js';
 import { setStreamTimeouts } from '../../src/server/llm/stream.js';
-import { reopenGeneration } from '../../src/server/orchestrator/generation.js';
+import { reopenGeneration, startGeneration } from '../../src/server/orchestrator/generation.js';
 import { BUDGET, GATE_GRACE_MS, GATE_TIMEOUT_MS, NAMED_GATE_MS, SMALL_TALK_CAPS, runTurn } from '../../src/server/orchestrator/turn.js';
 import type { AgentId, ConvEvent } from '../../src/shared/events.js';
 
@@ -387,6 +387,58 @@ describe('runTurn', () => {
         d.close();
       }
       expect(picks.size).toBeGreaterThan(1);
+    });
+  });
+
+  describe('a question for someone still writing', () => {
+    const writing = (agentId: AgentId) =>
+      startGeneration(actor, { agentId, turnId: 'old', hop: 0, replyTo: 'u1', effort: 'low', gist: 'x', othersReplying: [] });
+
+    it('waits for them instead of pushing a free teammate to say they do not know', async () => {
+      script({
+        gate: () => QUIET,
+        reply: (id, n) => (id === 'priya' && n === 0 ? { chunks: ['Writing ', 'on ', 'and ', 'on.'], delayMs: 30 } : { chunks: ['Ok.'], delayMs: 1 }),
+      });
+      const priya = writing('priya');
+      actor.append({ type: 'user_message', messageId: 'u2', clientMsgId: 'cm2', text: 'What is our runway?' });
+      await runTurn(actor, { triggerMessageId: 'u2', forced: [] });
+      const fresh = started().filter((e) => e.turnId !== 'old');
+      expect(fresh.map((e) => e.agentId)).toEqual(['priya']);
+      expect(fresh[0]!.seq).toBeGreaterThan(actor.eventsAfter(0).find((e) => e.type === 'message_completed' && e.messageId === priya.messageId)!.seq);
+    });
+
+    it('a question nobody writing owns does not wait', async () => {
+      script({ gate: () => QUIET, reply: () => ({ chunks: ['Ok ', 'then ', 'sure.'], delayMs: 30 }) });
+      writing('priya');
+      actor.append({ type: 'user_message', messageId: 'u2', clientMsgId: 'cm2', text: 'Anyone free for lunch?' });
+      await runTurn(actor, { triggerMessageId: 'u2', forced: [] });
+      const fresh = started().filter((e) => e.turnId !== 'old');
+      expect(fresh).toHaveLength(1);
+      expect(fresh[0]!.agentId).not.toBe('priya');
+    });
+
+    it('a free teammate who has something to say does not wait either', async () => {
+      script({
+        gate: (id) => (id === 'theo' ? { should_respond: true, novelty: 2, gist: 'renewal angle' } : QUIET),
+        reply: () => ({ chunks: ['Ok.'], delayMs: 1 }),
+      });
+      writing('priya');
+      actor.append({ type: 'user_message', messageId: 'u2', clientMsgId: 'cm2', text: 'What is our runway?' });
+      await runTurn(actor, { triggerMessageId: 'u2', forced: [] });
+      expect(started().filter((e) => e.turnId !== 'old')[0]!.agentId).toBe('theo');
+    });
+
+    it('a new turn or a stop ends the wait', async () => {
+      script({ gate: () => QUIET, reply: () => ({ chunks: ['Writing ', 'on ', 'and ', 'on.'], delayMs: 200 }) });
+      writing('priya');
+      actor.append({ type: 'user_message', messageId: 'u2', clientMsgId: 'cm2', text: 'What is our runway?' });
+      const turn = runTurn(actor, { triggerMessageId: 'u2', forced: [] });
+      await waitFor(() => fakeRequests.filter((r) => r.kind === 'gate').length === 2);
+      await sleep(5);
+      actor.turnAbort?.abort();
+      await turn;
+      expect(started().filter((e) => e.turnId !== 'old')).toHaveLength(0);
+      for (const g of actor.generations.values()) g.stop(0);
     });
   });
 
