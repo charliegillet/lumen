@@ -113,8 +113,14 @@ const EVERYONE_ASK =
 const EVERYONE_LEAD = /^(?:everyone|everybody|all\s+of\s+you|y'all|you\s+all|guys)\s*[,:!-]/i;
 const DEBATE =
   /\b(?:argue|debate|hash\s+(?:it|this)\s+out|fight\s+(?:it|this)\s+out|duke\s+it\s+out|have\s+it\s+out|go\s+back\s+and\s+forth|push\s+back\s+on\s+each\s+other|disagree\s+with\s+each\s+other|talk\s+it\s+out)\b/i;
+const NAME_PAIR = `@?(?:${NAME})(?:\\s*(?:,\\s*and|,|and|&|\\+)\\s*@?(?:${NAME}))+`;
+/** "Maya and Priya combined", "combine what Maya and Theo know": these two, answering as one. */
+const COMBINED_NAMES = new RegExp(
+  `(?<![\\w'])(${NAME_PAIR})(?:'s)?\\s+(?:combined|together|joint)(?![\\w'])|\\bcombin(?:e|ing)\\s+(?:what\\s+)?(${NAME_PAIR})(?![\\w'])`,
+  'i',
+);
 const JOINT =
-  /\b(?:(?:one|single|joint|shared|unified|combined)\s+(?:(?:single|joint|shared|unified|combined)\s+)*(?:answer|recommendation|plan|position|decision|verdict|view)|agree\s+on|consensus|align\s+on|(?:figure|work)\s+(?:it|this)\s+out\s+together)\b/i;
+  /\b(?:(?:one|single|joint|shared|unified|combined)\s+(?:(?:single|joint|shared|unified|combined)\s+)*(?:answer|recommendation|plan|position|decision|verdict|view|take|call)|agree\s+on|consensus|align\s+on|(?:figure|work)\s+(?:it|this)\s+out\s+together|combin(?:e|ing)\s+(?:what|your)\b|(?:you\s+two|you\s+both|both\s+of\s+you|the\s+(?:two|three)\s+of\s+you)\s+(?:combined|together)|heads\s+together|pool\s+(?:what|your))\b/i;
 
 export interface Addressing {
   /** Agents the message is aimed at. */
@@ -145,7 +151,7 @@ export function parseAddressing(text: string): Addressing {
     justOne,
     everyone: !only && !justOne && targets.length === 0 && (EVERYONE_ASK.test(trimmed) || EVERYONE_LEAD.test(bare)),
     debate: !only && !justOne && DEBATE.test(trimmed),
-    joint: !only && !justOne && JOINT.test(trimmed),
+    joint: !only && !justOne && (JOINT.test(trimmed) || COMBINED_NAMES.test(trimmed)),
   };
 }
 
@@ -185,6 +191,8 @@ function scan(text: string, human: boolean): RegexTargets {
     const m = re.exec(re === ONLY_TAIL ? trimmed.replace(FILLER, '') : trimmed);
     if (m) namesIn(m[1]!).forEach(add);
   }
+  const combined = COMBINED_NAMES.exec(trimmed);
+  if (combined) namesIn(combined[1] ?? combined[2]!).forEach(add);
   const closing = TRAILING_VOCATIVE.exec(trimmed);
   if (closing) add(closing[1]!.toLowerCase() as TargetAgentId);
 

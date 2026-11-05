@@ -140,6 +140,28 @@ describe('addressing', () => {
     expect(parseAddressing('agree on a date').joint).toBe(true);
     expect(parseAddressing('What is the plan?')).toMatchObject({ debate: false, joint: false });
   });
+
+  it.each([
+    ['Can we afford two more engineers? Need Maya and Priya combined.', ['maya', 'priya']],
+    ["What is Theo and Priya's combined take on Northwind?", ['theo', 'priya']],
+    ['Combine what Maya and Theo know: can we ship by March?', ['maya', 'theo']],
+    ['Maya and Priya together, can we hire?', ['maya', 'priya']],
+    ['Can you put your heads together on hiring?', []],
+    ['Pool what you know about Northwind', []],
+  ])('%s wants one answer from %j', (text, named) => {
+    const a = parseAddressing(text);
+    expect(a.joint).toBe(true);
+    expect(a.named).toEqual(named);
+  });
+
+  it.each([
+    'What is our combined revenue?',
+    'Put together a plan for SSO-lite',
+    'Did Maya and Priya talk?',
+    'Priya, how do the two deals look combined?',
+  ])('%s is not a request for one answer', (text) => {
+    expect(parseAddressing(text).joint).toBe(false);
+  });
 });
 
 describe('resume and topic drops', () => {
