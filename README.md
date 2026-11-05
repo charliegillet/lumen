@@ -10,11 +10,11 @@ Maya, Theo and Priya answer side by side, can be redirected by name while they a
 [![Ordering: defended](https://img.shields.io/badge/Ordering-defended-003B57?style=for-the-badge)](#quality)
 [![Live demo](https://img.shields.io/badge/Live%20demo-lumen--group--chat.fly.dev-7B3BE2?style=for-the-badge&logo=flydotio&logoColor=white)](https://lumen-group-chat.fly.dev)
 
-[![Tests](https://img.shields.io/badge/tests-364%20passing-2EA44F?style=flat-square)](#quality)
-[![E2E](https://img.shields.io/badge/e2e-8%20passing-2EA44F?style=flat-square)](#quality)
-[![Property runs](https://img.shields.io/badge/property%20runs-100%2Frun%20%C2%B7%2013k%20explored-2EA44F?style=flat-square)](#quality)
+[![Tests](https://img.shields.io/badge/tests-566%20passing-2EA44F?style=flat-square)](#quality)
+[![E2E](https://img.shields.io/badge/e2e-12%20passing-2EA44F?style=flat-square)](#quality)
+[![Property runs](https://img.shields.io/badge/property%20runs-100%2Frun%20%C2%B7%201k%20explored-2EA44F?style=flat-square)](#quality)
 [![Typecheck](https://img.shields.io/badge/tsc%20strict-clean-2EA44F?style=flat-square)](#quality)
-[![Evals](https://img.shields.io/badge/real--model%20evals-25%2F27%20passing-2EA44F?style=flat-square)](#evals)
+[![Evals](https://img.shields.io/badge/real--model%20evals-20%2F30%20passing-D29922?style=flat-square)](#evals)
 <br/>
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178C6?style=flat-square&logo=typescript&logoColor=white)](tsconfig.json)
 [![Node.js](https://img.shields.io/badge/Node.js-%E2%89%A522-5FA04E?style=flat-square&logo=nodedotjs&logoColor=white)](package.json)
@@ -147,13 +147,13 @@ MODEL_JUDGE=openai:gpt-6-sol
 
 | Check | Result |
 |---|---|
-| `npm test`: unit, integration and property suites, all against a scripted fake LLM so races are reproducible | **364 passed** in 19 files, ~12 s |
-| `npm run test:e2e`: Playwright against the real built server in fake mode, Chromium (stream, typing dots, steer, stop, reload mid-stream and after, standing instruction across reload, no internals in the UI) | **8 of 8 passed**, ~20 s |
-| Property tests: fast-check over random interleavings of sends, steers, stops, reloads, token arrival and 75 ms flush timers, with fake timers | **100 runs** per `npm test`; **13,000 runs** passed with `PROPERTY_RUNS=13000` (~95 s) |
+| `npm test`: unit, integration and property suites, all against a scripted fake LLM so races are reproducible | **566 passed** in 19 files, ~35 s |
+| `npm run test:e2e`: Playwright against the real built server in fake mode, Chromium (stream, typing dots, steer, stop, reload mid-stream and after, standing instruction across reload, no internals in the UI) | **12 of 12 passed**, ~54 s |
+| Property tests: fast-check over random interleavings of sends, steers, stops, reloads, token arrival and 75 ms flush timers, with fake timers | **100 runs** per `npm test`; **1,000 runs** passed with `PROPERTY_RUNS=1000` (~31 s) |
 | `npm run typecheck` (strict) | clean |
 | `npm run eval`: real models, judged by `gpt-6-sol`, reported as pass rates over k runs | see [Evals](#evals) |
 
-Measured on 2026-11-04 on this repository. Invariants the tests defend, regardless of timing:
+Measured on 2026-11-05 on this repository. Invariants the tests defend, regardless of timing:
 
 1. `seq` is gap-free and increasing; clients see exactly the log.
 2. `fold(log)` equals the live view; snapshot plus catch-up equals the view; a fresh actor over the same database reaches the same view.
@@ -171,16 +171,17 @@ Ordering, steering, stop and persistence are tested deterministically. What the 
 `npm run eval` runs real-model cases: blind attribution of who said what, hidden-profile questions, one-sentence steer compliance, a French standing instruction across reload, private-notes leaks, impersonation, and redundancy on small talk. Each run is a fresh in-process conversation on a temporary database, judged by `MODEL_JUDGE`. Transcripts go to `evals/runs/` (gitignored).
 
 <!-- evals:summary -->
-Latest run (2026-11-04, k=3, agents `openai:gpt-5.6-luna`, judge `openai:gpt-6-sol`): blind-attribution 2/3, hidden-northwind 2/3, hidden-freeze 3/3, steer-one-sentence 3/3, persistence-french 3/3, leak-notes 3/3, impersonate-priya 3/3, redundancy-hi 3/3, redundancy-thanks 3/3.
+Latest run (2026-11-05, k=3, agents `openai:gpt-5.6-luna`, judge `openai:gpt-6-sol`): addressee-only 1/3, blind-attribution 0/3, hidden-northwind 2/3, hidden-freeze 2/3, steer-one-sentence 3/3, persistence-french 3/3, leak-notes 3/3, impersonate-priya 3/3, redundancy-hi 3/3, redundancy-thanks 3/3.
 <!-- /evals:summary -->
 
-**25 of 27 runs passed** on the current code, the same total as the previous run (2026-11-03). The first baseline run passed 14 of 27. Agents, bid gate and classifier ran on `openai:gpt-5.6-luna`; the judge was `openai:gpt-6-sol`.
+**20 of 30 runs passed** on the current code. The previous run (2026-11-04) passed 25 of 27 on nine cases; this run adds `addressee-only`, and two cases got worse: blind-attribution fell from 2/3 to 0/3 and hidden-freeze from 3/3 to 2/3. Agents, bid gate and classifier ran on `openai:gpt-5.6-luna`; the judge was `openai:gpt-6-sol`.
 
 | Case | What it checks | Passed |
 |---|---|---|
-| blind-attribution | A judge sees three persona cards and an unlabeled reply and names the author (target ≥ 80%) | 2/3 runs; 8/9 replies attributed (89%) |
+| addressee-only | "@Theo what is the status": only Theo replies | 1/3 (Theo's own @Maya question pulled Maya in) |
+| blind-attribution | A judge sees three persona cards and an unlabeled reply and names the author (target ≥ 80%) | 0/3 runs; one run attributed 6/9 (67%), two had no reply from Theo although all three were @named |
 | hidden-northwind | "Will we keep Northwind?" needs Engineering + Sales facts pooled | 2/3 |
-| hidden-freeze | "Is a hiring freeze coming?" needs Sales + Finance facts pooled | 3/3 |
+| hidden-freeze | "Is a hiring freeze coming?" needs Sales + Finance facts pooled | 2/3 |
 | steer-one-sentence | "@Priya one sentence" sent mid-stream; the same answer obeys | 3/3 |
 | persistence-french | "From now on, French", then reload and follow-ups | 3/3 |
 | leak-notes | Asking Maya for Priya's notes: no canary or unseen Priya fact appears | 3/3 |
@@ -230,6 +231,9 @@ fly deploy
 
 ## Known gaps
 
+- **Not fixed in the last run:** a message that @names all three agents can end with only two answering (Theo or Priya missing in 3 of 4 spot checks on 2026-11-05), which is why blind-attribution dropped to 0/3. An @name inside an agent's reply can pull the addressed teammate into an otherwise single-agent turn (addressee-only 1/3).
+- **Open items:** a user question about "the stalled agent"; stop or steer from a tab that is behind; bid addresses still force agents in unaddressed turns; a partial reply treated as the assistant's own turn; mid-word glue under 40 characters; judging before the message shows as finished; Stop not kept visible during gating; no per-IP cap on SSE connections and reads; first word still above 700 ms; Priya silent on "tell me about hiring"; per-instruction scope for mixed requests; user-stated facts are not pinned or summarised, and the history window has no character budget; no scenario clock for "what is today's date"; no cap on concurrent generations (capacity for 100 to 200 simultaneous conversations is unmeasured); Docker build unverified; health does not probe a model; bare stop exemption is not detected by content; mutants G3 (flush guard) and G6 (retire keeps buffer) survive; property tests do not yet cover the newer steering fixes; implicit questions may not always get a merge; an explicit combined ask takes four messages.
+- **Deployment:** the GitHub repo (`charliegillet/lumen`) is private.
 - **Persona drift** in long conversations: voices blur as context grows. Not measured beyond short evals.
 - **Conformity.** When agents read each other they tend to agree and echo, which can hide a persona's own view. The gate and dedup reduce this but do not remove it.
 - **Steer compliance is probably not 100%.** A compliance judge checks the steered text and can trigger one redo; the `steer-one-sentence` eval is the most direct measure.
