@@ -29,9 +29,13 @@ export type EventBody =
       messageId: string;
       reason: 'user_stop' | 'error' | 'server_restart';
       truncateTo: number;
+      /** The message ends with this text instead: a rewrite that was cut before it wrote anything keeps what it replaced. */
+      restoreText?: string;
     }
   | { type: 'instruction_set'; instructionId: string; scope: AgentId | 'all'; text: string }
   | { type: 'instruction_revoked'; instructionId: string }
   | { type: 'steer_resolved'; userMessageId: string; targets: AgentId[] } // invisible; lets clients unfreeze
-  | { type: 'stop_all'; clientReqId: string };
+  | { type: 'stop_all'; clientReqId: string }
+  /** The person called these off (a stop, or moving to another topic). They stay on screen; agents must not pick them up again. */
+  | { type: 'asks_dropped'; messageIds: string[] };
 export type ConvEvent = EventBody & { seq: number; conversationId: string; at: number };

@@ -13,6 +13,8 @@ export interface MessageView {
   hop: number;
   /** User messages only: the sender's id, so a client can match its unconfirmed send. */
   clientMsgId?: string;
+  /** Called off by the person; set only when true. A later segment on the message clears it. */
+  dropped?: true;
 }
 export interface ConversationView {
   lastSeq: number;
@@ -110,7 +112,7 @@ export function applyEvent(view: ConversationView, e: ConvEvent): ConversationVi
     case 'message_segment_started':
       // A segment is the newest event, so moving to the end keeps anchorSeq order.
       return withMessages(
-        (e.moved ? moveToEnd : updateMessage)(view, e.messageId, (m) => ({
+        (e.moved ? moveToEnd : updateMessage)(view, e.messageId, ({ dropped: _picked, ...m }) => ({
           ...m,
           text: m.text.slice(0, e.truncateTo),
           segment: e.segment,
@@ -127,7 +129,7 @@ export function applyEvent(view: ConversationView, e: ConvEvent): ConversationVi
       return withMessages(
         updateMessage(view, e.messageId, (m) => ({
           ...m,
-          text: m.text.slice(0, e.truncateTo),
+          text: e.restoreText ?? m.text.slice(0, e.truncateTo),
           status: 'stopped',
           completedAt: null,
         })),
@@ -142,6 +144,11 @@ export function applyEvent(view: ConversationView, e: ConvEvent): ConversationVi
       };
     case 'instruction_revoked':
       return { ...base, instructions: view.instructions.filter((i) => i.id !== e.instructionId) };
+    case 'asks_dropped':
+      return {
+        ...base,
+        messages: view.messages.map((m) => (e.messageIds.includes(m.id) ? { ...m, dropped: true as const } : m)),
+      };
     case 'steer_resolved':
     case 'stop_all':
       return base;

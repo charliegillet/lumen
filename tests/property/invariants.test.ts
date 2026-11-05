@@ -8,7 +8,7 @@ import { FLUSH_MS } from '../../src/server/orchestrator/generation.js';
 import { BUDGET } from '../../src/server/orchestrator/turn.js';
 import { handleStop, handleUserMessage } from '../../src/server/steering/handle.js';
 import type { SteerDecision } from '../../src/server/steering/classify.js';
-import { applyEvent, fold, type ConversationView } from '../../src/shared/reducer.js';
+import { applyEvent, emptyView, fold, type ConversationView } from '../../src/shared/reducer.js';
 import type { AgentId, ConvEvent } from '../../src/shared/events.js';
 
 /*
@@ -357,7 +357,7 @@ function checkFinal(r: Real): void {
         // 5: exactly one terminal per segment.
         expect(l!.open, `${at}: second terminal for segment ${l!.segment}`).toBe(true);
         l!.open = false;
-        if (e.type === 'message_aborted') l!.text = Math.min(l!.text, e.truncateTo);
+        if (e.type === 'message_aborted') l!.text = e.restoreText?.length ?? Math.min(l!.text, e.truncateTo);
         break;
       }
       case 'stop_all':
@@ -371,6 +371,19 @@ function checkFinal(r: Real): void {
   for (const [id, l] of life) expect(l.open, `message ${id} segment ${l.segment} never closed`).toBe(false);
   expect(r.actor.view.messages.filter((m) => m.status === 'streaming'), 'streaming once idle').toEqual([]);
   expect(r.actor.generations.size).toBe(0);
+
+  // 11: a stop or a restart never takes an answer the person could read down to nothing.
+  const cutWords = new Set<string>();
+  let v = emptyView;
+  for (const e of evs) {
+    if (e.type === 'message_segment_started' && (v.messages.find((m) => m.id === e.messageId)?.text ?? '') !== '') {
+      cutWords.add(e.messageId);
+    }
+    v = applyEvent(v, e);
+  }
+  for (const id of cutWords) {
+    expect(r.actor.view.messages.find((m) => m.id === id)?.text, `message ${id} lost its words`).not.toBe('');
+  }
 
   // 6: per-turn budgets.
   const perTurn = new Map<string, number>();

@@ -1,16 +1,19 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import Database from 'better-sqlite3';
 import { openDb, type Db } from '../../src/server/db.js';
 import { ConversationActor } from '../../src/server/actor.js';
-import { fakeRequests, resetFake, setFakeScript } from '../../src/server/llm/fake.js';
+import { fakeRequests, resetFake, setFakeScript, type FakeReply } from '../../src/server/llm/fake.js';
 import {
+  lastSentenceEnd,
   mustHold,
   overlapLength,
   reopenGeneration,
+  restatement,
   startGeneration,
   stripContinuation,
   type Generation,
 } from '../../src/server/orchestrator/generation.js';
-import { visibleMessages } from '../../src/shared/reducer.js';
+import { fold, visibleMessages } from '../../src/shared/reducer.js';
 import { setStreamTimeouts, STREAM_IDLE_MS, STREAM_TOTAL_MS } from '../../src/server/llm/stream.js';
 import type { AgentId, ConvEvent, EventBody } from '../../src/shared/events.js';
 
@@ -623,5 +626,201 @@ describe('reopenGeneration', () => {
     expect(() => reopenGeneration(actor, 'nope', ['x'])).toThrow();
     expect(() => reopenGeneration(actor, 'u1', ['x'])).toThrow();
     await g.done;
+  });
+});
+
+describe('a rewrite never costs the answer', () => {
+  const answer = async () => {
+    const g = start('theo');
+    await g.done;
+    return g;
+  };
+  const words = 'An answer long enough to be worth keeping around.';
+  const scripted = (rewrite: FakeReply) =>
+    setFakeScript((r) => (r.kind === 'reply' ? { chunks: [words], delayMs: 2 } : rewrite));
+
+  it('stop before the first new token keeps the old text', async () => {
+    scripted({ chunks: ['new'], delayMs: 200 });
+    const g = await answer();
+    const r = reopenGeneration(actor, g.messageId, ['x'], { moved: true });
+    r.stop(0);
+    expect(msg(g)).toMatchObject({ status: 'stopped', text: words });
+    const end = eventsFor(g).at(-1);
+    expect(end).toMatchObject({ type: 'message_aborted', truncateTo: words.length, restoreText: words });
+    expect(fold(actor.eventsAfter(0))).toEqual(actor.view);
+  });
+
+  it('stop before the client saw any new word keeps the old text too', async () => {
+    scripted({ chunks: Array.from({ length: 30 }, (_, i) => `new${i} `), delayMs: 20 });
+    const g = await answer();
+    const r = reopenGeneration(actor, g.messageId, ['x'], { moved: true });
+    await waitFor(() => r.textSoFar().length > 0);
+    r.stop(0);
+    expect(msg(g)?.text).toBe(words);
+  });
+
+  it('stop after new words were seen keeps those', async () => {
+    scripted({ chunks: Array.from({ length: 30 }, (_, i) => `new${i} `), delayMs: 20 });
+    const g = await answer();
+    const r = reopenGeneration(actor, g.messageId, ['x'], { moved: true });
+    await waitFor(() => r.textSoFar().length >= 4);
+    r.stop(4);
+    expect(msg(g)?.text).toBe('new0');
+  });
+
+  it('stop on a live restart before any new token keeps what was there', async () => {
+    setFakeScript((r) => (r.kind === 'reply' ? { chunks: [words, ' more', ' more'], delayMs: 30 } : { chunks: ['new'], delayMs: 200 }));
+    const g = start('theo');
+    await waitFor(() => g.textSoFar() !== '');
+    const had = g.textSoFar();
+    g.restart('replace', 0, ['x'], { moved: true });
+    g.stop(0);
+    expect(msg(g)?.text).toBe(had);
+  });
+
+  it('a rewrite that comes back empty is retried, then puts the answer back', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    scripted({ chunks: [], delayMs: 0 });
+    const g = await answer();
+    const r = reopenGeneration(actor, g.messageId, ['x']);
+    expect(await r.done).toBe('error');
+    expect(msg(g)?.text).toBe(words);
+    expect(fakeRequests.filter((x) => x.kind === 'replace')).toHaveLength(2);
+  });
+
+  it('a retried rewrite that then works is simply the answer', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    let n = 0;
+    setFakeScript((r) => {
+      if (r.kind === 'reply') return { chunks: [words], delayMs: 2 };
+      n += 1;
+      return n === 1 ? { error: 'blip' } : { chunks: ['Fixed.'], delayMs: 2 };
+    });
+    const g = await answer();
+    const r = reopenGeneration(actor, g.messageId, ['x']);
+    expect(await r.done).toBe('completed');
+    expect(msg(g)).toMatchObject({ status: 'done', text: 'Fixed.' });
+  });
+
+  it('a short fragment from a rewrite that dies gives way to the old answer', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    scripted({ error: 'cut off', afterChunks: 3 });
+    const g = await answer();
+    const r = reopenGeneration(actor, g.messageId, ['x']);
+    expect(await r.done).toBe('error');
+    expect(msg(g)?.text).toBe(words);
+    expect(fold(actor.eventsAfter(0))).toEqual(actor.view);
+  });
+
+  it('a user steer that cannot be applied says so', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    scripted({ error: 'provider down' });
+    const g = await answer();
+    const r = reopenGeneration(actor, g.messageId, ['x'], { moved: true });
+    await r.done;
+    expect(msg(g)?.text.startsWith(words)).toBe(true);
+    expect(msg(g)?.text).toContain('ask me again');
+  });
+
+  it('a continuation that fails with no words puts the cut text back', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    setFakeScript((r) =>
+      r.kind === 'reply'
+        ? { chunks: ['One sentence here. ', 'And a second one here.', ...Array.from({ length: 30 }, () => ' And more.')], delayMs: 30 }
+        : { error: 'down' },
+    );
+    const g = start('theo');
+    await waitFor(() => g.textSoFar().length > 25);
+    const had = g.textSoFar();
+    g.restart('continue', 19, ['x']);
+    expect(await g.done).toBe('error');
+    expect(msg(g)?.text).toBe(had);
+  });
+
+  describe('crash recovery', () => {
+    const copyAfterCrash = () => new ConversationActor(new Database(db.serialize()), 'c1');
+
+    it('a crash right after a rewrite began recovers the old text', async () => {
+      scripted({ chunks: ['new'], delayMs: 100 });
+      const g = await answer();
+      const r = reopenGeneration(actor, g.messageId, ['x'], { moved: true });
+      const fresh = copyAfterCrash();
+      const m = fresh.view.messages.find((x) => x.id === g.messageId)!;
+      expect(m).toMatchObject({ status: 'stopped', text: words });
+      expect(fresh.eventsAfter(actor.lastSeq).map((e) => e.type)).toEqual(['message_aborted']);
+      expect(fold(fresh.eventsAfter(0))).toEqual(fresh.view);
+      r.stop(0);
+    });
+
+    it('a crash after a rewrite wrote plenty keeps the new text', async () => {
+      setFakeScript((r) =>
+        r.kind === 'reply' ? { chunks: ['Old.'], delayMs: 2 } : { chunks: [words, ...Array.from({ length: 20 }, () => ' more')], delayMs: 40 },
+      );
+      const g = await answer();
+      const r = reopenGeneration(actor, g.messageId, ['x'], { moved: true });
+      await waitFor(() => r.textSoFar().length > 0);
+      const fresh = copyAfterCrash();
+      expect(fresh.view.messages.find((x) => x.id === g.messageId)?.text).toContain(words);
+      r.stop(0);
+    });
+  });
+});
+
+describe('the continue seam', () => {
+  it('drops a sentence that only restates the partial', () => {
+    const partial = 'SSO-lite can ship Feb 20 only if two engineers move. ';
+    const head = 'SSO-lite can ship Feb 20 only if two engineers move to it. Dana signs off.';
+    const r = restatement(partial, head);
+    expect(head.slice(r.drop)).toBe('Dana signs off.');
+  });
+
+  it('holds while a head could still be restating, and lets go when it is not', () => {
+    const partial = 'SSO-lite can ship Feb 20 only if two engineers move. ';
+    expect(restatement(partial, 'SSO-li')).toEqual({ hold: true, drop: 0 });
+    expect(restatement(partial, 'SSO-lite can ship Feb 20 only if')).toEqual({ hold: true, drop: 0 });
+    expect(restatement(partial, 'Dana signs off')).toEqual({ hold: false, drop: 0 });
+  });
+
+  it('adds the missing space after a finished sentence', () => {
+    expect(stripContinuation('It ships Friday.', 'Dana signs off.')).toBe(' Dana signs off.');
+    expect(stripContinuation('It ships Friday.', ' Dana signs off.')).toBe(' Dana signs off.');
+  });
+
+  it('finds the last finished sentence', () => {
+    expect(lastSentenceEnd('No sentence yet')).toBe(0);
+    const s = 'First one. Second one! And a thi';
+    expect(s.slice(0, lastSentenceEnd(s))).toBe('First one. Second one! ');
+    expect(lastSentenceEnd('Ends here.')).toBe(10);
+    expect(lastSentenceEnd('v2.1 is out')).toBe(0);
+  });
+
+  it('a model that starts over does not repeat the answer on screen', async () => {
+    const partial = 'SSO-lite can ship Feb 20 only if two engineers move. ';
+    setFakeScript((r) =>
+      r.kind === 'reply'
+        ? { chunks: [partial, ...Array.from({ length: 30 }, () => 'Then more. ')], delayMs: 30 }
+        : { chunks: ['SSO-lite can ship ', 'Feb 20 only if two ', 'engineers move to it. ', 'Dana signs off.'], delayMs: 2 },
+    );
+    const g = start('theo');
+    await waitFor(() => g.textSoFar().startsWith(partial));
+    g.restart('continue', partial.length, ['who signs off']);
+    expect(await g.done).toBe('completed');
+    expect(msg(g)?.text).toBe(`${partial}Dana signs off.`);
+  });
+
+  it('a continuation that only restates counts as writing nothing', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const partial = 'SSO-lite can ship Feb 20 only if two engineers move. ';
+    setFakeScript((r) =>
+      r.kind === 'reply'
+        ? { chunks: [partial, ...Array.from({ length: 30 }, () => 'Then more. ')], delayMs: 30 }
+        : { chunks: ['SSO-lite can ship Feb 20 only if two engineers move.'], delayMs: 2 },
+    );
+    const g = start('theo');
+    await waitFor(() => g.textSoFar().startsWith(partial));
+    const had = g.textSoFar();
+    g.restart('continue', partial.length, ['x']);
+    await g.done;
+    expect(msg(g)?.text).toBe(had);
   });
 });

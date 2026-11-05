@@ -10,6 +10,8 @@ CREATE TABLE IF NOT EXISTS events (
   body TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (conversation_id, seq));
 CREATE UNIQUE INDEX IF NOT EXISTS uniq_client_msg ON events(conversation_id, json_extract(body,'$.clientMsgId'))
   WHERE type = 'user_message';
+CREATE INDEX IF NOT EXISTS stop_req ON events(conversation_id, json_extract(body,'$.clientReqId'))
+  WHERE type = 'stop_all';
 `;
 
 export function openDb(path: string): Db {

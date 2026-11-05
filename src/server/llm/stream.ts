@@ -78,6 +78,8 @@ export async function* streamChat(a: {
   messages: ModelMessage[];
   signal: AbortSignal;
   effort: Effort;
+  /** Skip reasoning whatever the effort: the person is waiting on the first word. */
+  fast?: boolean;
   meta: ReqMeta;
 }): AsyncIterable<string> {
   const e = EFFORT[a.effort];
@@ -90,7 +92,7 @@ export async function* streamChat(a: {
   };
   const total = setTimeout(expire('total', totalMs), totalMs);
   let idle = setTimeout(expire('idle', idleMs), idleMs);
-  const reasoning = reasoningFor(modelSpec(a.role, a.agentId), e.reasoning);
+  const reasoning = reasoningFor(modelSpec(a.role, a.agentId), a.fast ? 'none' : e.reasoning);
   const result = streamText({
     model: modelFor(a.role, a.agentId),
     system: a.system,

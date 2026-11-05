@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import type { AgentId } from '../../shared/events.js';
 import type { ConversationActor } from '../actor.js';
-import { buildPrompt } from '../agents/prompt.js';
+import { buildPromptFromView } from '../agents/prompt.js';
 import { generateStructured } from '../llm/stream.js';
 
 export const BidSchema = z.object({
@@ -71,10 +71,7 @@ export async function runGate(
   hop: number,
   signal: AbortSignal,
 ): Promise<Bid> {
-  const { system, messages } = buildPrompt(agentId, actor.eventsUpTo(cutoffSeq), cutoffSeq, {
-    kind: 'gate',
-    hop,
-  });
+  const { system, messages } = buildPromptFromView(agentId, actor.viewAt(cutoffSeq), { kind: 'gate', hop });
   try {
     const raw = await generateStructured({
       role: 'gate',

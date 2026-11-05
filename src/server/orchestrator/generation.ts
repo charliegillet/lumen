@@ -1,8 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import type { ModelMessage } from 'ai';
 import type { AgentId, Effort, EventBody } from '../../shared/events.js';
-import type { ConversationActor } from '../actor.js';
-import { buildPrompt, type PromptMode } from '../agents/prompt.js';
+import type { ConversationView } from '../../shared/reducer.js';
+import { MIN_RESTORE_CHARS, type ConversationActor } from '../actor.js';
+import { buildPromptFromView, type PromptMode } from '../agents/prompt.js';
 import { modelSpec } from '../llm/registry.js';
 import { streamChat } from '../llm/stream.js';
 
@@ -10,6 +11,10 @@ export const FLUSH_MS = 75;
 /** Continue mode buffers this many leading chars to detect a repeated tail. */
 const OVERLAP_WINDOW = 40;
 const MIN_OVERLAP = 3;
+/** A continuation sharing this many leading chars with one of the partial's sentences is restating it. */
+const RESTATE_CHARS = 24;
+/** Said in the agent's voice when a steer could not be applied, so the old answer is not mistaken for the new one. */
+const COULD_NOT_APPLY = "\n\n(Sorry, I couldn't redo this just now. Could you ask me again?)";
 
 type Outcome = 'completed' | 'stopped' | 'error';
 type SegmentKind = 'reply' | 'continue' | 'replace';
@@ -34,8 +39,12 @@ interface Segment {
   startedAt: number;
   /** Has a token_delta from this segment been appended? */
   visible: boolean;
-  /** Replace only: the text it cleared, put back if it fails before writing anything. */
+  /** The text this segment cut, put back if it ends with nothing to show for it. */
   readonly restore: string;
+  /** A user steer caused it. */
+  readonly moved: boolean;
+  /** A failed start gets one more try. */
+  retried: boolean;
 }
 
 interface ReopenArgs {
@@ -46,6 +55,8 @@ interface ReopenArgs {
   segment: number;
   steers: string[];
   moved: boolean;
+  /** Pick the message up where it stops instead of rewriting it. */
+  resume?: boolean;
 }
 
 /**
@@ -79,6 +90,8 @@ export class Generation {
   effort: Effort;
   /** For the current segment: has a non-empty chunk arrived? */
   firstTokenSeen = false;
+  /** When the current stream last produced anything. */
+  lastActivityAt = Date.now();
   readonly done: Promise<Outcome>;
 
   private readonly actor: ConversationActor;
@@ -96,6 +109,7 @@ export class Generation {
     this.done = new Promise((r) => (this.resolveDone = r));
     // The agent's own start event is deliberately outside its context.
     const cutoff = actor.lastSeq;
+    const view = actor.view;
 
     if ('start' in init) {
       const a = init.start;
@@ -104,7 +118,7 @@ export class Generation {
       this.hop = a.hop;
       this.effort = a.effort;
       this.triggerSeq = a.triggerSeq;
-      this.current = newSegment(0, '');
+      this.current = newSegment(0, '', '', false);
       this.begin({
         type: 'message_started',
         messageId: this.messageId,
@@ -115,7 +129,7 @@ export class Generation {
         contextCutoffSeq: cutoff,
         effort: a.effort,
       });
-      this.launch(this.current, 'reply', cutoff, {
+      this.launch(this.current, 'reply', view, {
         kind: 'reply',
         gist: a.gist,
         effort: a.effort,
@@ -133,17 +147,22 @@ export class Generation {
     this.triggerSeq = undefined;
     this.segment = r.segment;
     const previous = actor.view.messages.find((m) => m.id === r.messageId)?.text ?? '';
-    this.current = newSegment(r.segment, '', previous);
+    const partial = r.resume ? previous : '';
+    this.current = newSegment(r.segment, partial, previous, r.moved);
     this.begin({
       type: 'message_segment_started',
       messageId: r.messageId,
       segment: r.segment,
       contextCutoffSeq: cutoff,
-      truncateTo: 0,
-      mode: 'replace',
+      truncateTo: partial.length,
+      mode: r.resume ? 'continue' : 'replace',
       ...movedField(r.moved),
     });
-    this.launch(this.current, 'replace', cutoff, { kind: 'replace', steers: r.steers, effort: r.effort });
+    if (r.resume) {
+      this.launch(this.current, 'continue', view, { kind: 'continue', partial, steers: r.steers, effort: r.effort });
+    } else {
+      this.launch(this.current, 'replace', view, { kind: 'replace', steers: r.steers, effort: r.effort });
+    }
   }
 
   /** Registers as live and appends the opening event; a failed append ends the generation. */
@@ -178,15 +197,15 @@ export class Generation {
     const committed = this.textSoFar();
     const keep = mode === 'continue' ? clamp(truncateTo, committed.length) : 0;
     const partial = committed.slice(0, keep);
-    // A replace cut back to nothing yet keeps what it cleared (or what an
-    // earlier replace that never wrote had cleared).
-    const restore = mode === 'replace' ? (committed !== '' ? committed : this.current.restore) : '';
+    // Keeps what it cuts, or what an earlier rewrite that barely wrote had cut.
+    const restore = committed.length * 2 >= this.current.restore.length ? committed : this.current.restore;
     this.retire(this.current); // unflushed text was never visible: drop it
 
     this.segment += 1;
     this.firstTokenSeen = false;
-    this.current = newSegment(this.segment, partial, restore);
+    this.current = newSegment(this.segment, partial, restore, opts.moved);
     const cutoff = this.actor.lastSeq;
+    const view = this.actor.view;
     try {
       this.actor.append({
         type: 'message_segment_started',
@@ -206,7 +225,7 @@ export class Generation {
     this.launch(
       this.current,
       mode,
-      cutoff,
+      view,
       mode === 'continue'
         ? { kind: 'continue', partial, steers, effort: this.effort }
         : { kind: 'replace', steers, effort: this.effort },
@@ -218,6 +237,8 @@ export class Generation {
   stop(truncateTo: number): void {
     if (this.terminal) return;
     const keep = clamp(truncateTo, this.textSoFar().length);
+    // Stopping a rewrite before any of it was seen keeps the answer it was replacing.
+    const back = keep === 0 && this.current.restore !== '' ? this.current.restore : undefined;
     this.terminal = true;
     this.retire(this.current);
     try {
@@ -225,11 +246,21 @@ export class Generation {
         type: 'message_aborted',
         messageId: this.messageId,
         reason: 'user_stop',
-        truncateTo: keep,
+        truncateTo: back?.length ?? keep,
+        ...(back !== undefined ? { restoreText: back } : {}),
       });
     } finally {
       this.settle('stopped'); // a failed append still ends the generation (and rethrows)
     }
+  }
+
+  isLive(): boolean {
+    return !this.terminal;
+  }
+
+  /** Give up on a stream that has gone quiet; ends like any failed stream. */
+  abandon(why: string): void {
+    this.fail(this.current, new Error(why));
   }
 
   // -------------------------------------------------------------------------
@@ -238,12 +269,13 @@ export class Generation {
     return !this.terminal && seg === this.current;
   }
 
-  private launch(seg: Segment, kind: SegmentKind, cutoff: number, mode: PromptMode): void {
+  private launch(seg: Segment, kind: SegmentKind, view: ConversationView, mode: PromptMode): void {
     seg.kind = kind;
     seg.startedAt = performance.now();
+    this.lastActivityAt = Date.now();
     let prompt: { system: string; messages: ModelMessage[] };
     try {
-      prompt = buildPrompt(this.agentId, this.actor.eventsUpTo(cutoff), cutoff, mode);
+      prompt = buildPromptFromView(this.agentId, view, mode);
     } catch (err) {
       // Defer so callers (constructor/restart) return before the terminal append.
       queueMicrotask(() => this.fail(seg, err));
@@ -268,6 +300,7 @@ export class Generation {
         messages: prompt.messages,
         signal: seg.ctrl.signal,
         effort: this.effort,
+        fast: seg.moved, // the person just steered and is waiting for words
         meta: { kind, agentId: this.agentId },
       });
       for await (const chunk of stream) {
@@ -277,7 +310,13 @@ export class Generation {
       if (!this.live(seg)) return;
       this.releaseHead(seg);
       this.flush(seg);
+      if (kind !== 'reply' && !seg.visible) throw new Error('the model wrote nothing');
     } catch (err) {
+      if (kind !== 'reply' && !seg.retried && this.live(seg) && !seg.visible && seg.buf === '') {
+        seg.retried = true;
+        seg.head = seg.partial === '' ? null : '';
+        return this.run(seg, kind, prompt);
+      }
       this.fail(seg, err);
       return;
     }
@@ -295,18 +334,20 @@ export class Generation {
   private receive(seg: Segment, chunk: string): void {
     if (chunk === '') return;
     this.firstTokenSeen = true;
+    this.lastActivityAt = Date.now();
     if (seg.head !== null) {
       seg.head += chunk;
-      if (!mustHold(seg.partial, seg.head)) this.releaseHead(seg);
+      const r = restatement(seg.partial, seg.head);
+      if (!r.hold && !mustHold(seg.partial, seg.head.slice(r.drop))) this.releaseHead(seg);
       return;
     }
     this.buffer(seg, chunk);
   }
 
-  /** Continue mode: drop the part of the head that repeats the partial's tail. */
+  /** Continue mode: drop whatever only repeats the partial, at its start or at the seam. */
   private releaseHead(seg: Segment): void {
     if (seg.head === null) return;
-    const head = seg.head;
+    const head = seg.head.slice(restatement(seg.partial, seg.head).drop);
     seg.head = null;
     const rest = stripContinuation(seg.partial, head);
     if (rest !== '') this.buffer(seg, rest);
@@ -355,19 +396,26 @@ export class Generation {
   private fail(seg: Segment, err: unknown): void {
     if (!this.live(seg)) return;
     // Keep what already arrived: it is real model output.
+    let restoreText: string | undefined;
     try {
       this.releaseHead(seg);
       this.flush(seg);
-      // A rewrite that failed before writing anything must not erase the
-      // answer it was replacing: put the old text back in this segment.
-      if (!seg.visible && seg.restore !== '' && this.textSoFar() === '') {
-        this.actor.append({
-          type: 'token_delta',
-          messageId: this.messageId,
-          segment: seg.segment,
-          offset: 0,
-          text: seg.restore,
-        });
+      // A rewrite that ended with next to nothing must not erase the answer it
+      // was replacing: put the old text back in this segment.
+      const now = this.textSoFar();
+      if (shouldRestore(seg, now)) {
+        const back = seg.moved ? seg.restore + COULD_NOT_APPLY : seg.restore;
+        if (back.startsWith(now)) {
+          this.actor.append({
+            type: 'token_delta',
+            messageId: this.messageId,
+            segment: seg.segment,
+            offset: now.length,
+            text: back.slice(now.length),
+          });
+        } else {
+          restoreText = back;
+        }
       }
     } catch {
       // fall through to the abort below with whatever is committed
@@ -380,7 +428,8 @@ export class Generation {
         type: 'message_aborted',
         messageId: this.messageId,
         reason: 'error',
-        truncateTo: this.textSoFar().length,
+        truncateTo: restoreText?.length ?? this.textSoFar().length,
+        ...(restoreText !== undefined ? { restoreText } : {}),
       });
     } catch (err2) {
       console.warn(`generation ${this.messageId}: could not append message_aborted`, err2);
@@ -403,9 +452,11 @@ export class Generation {
   }
 }
 
-function newSegment(segment: number, partial: string, restore = ''): Segment {
+function newSegment(segment: number, partial: string, restore: string, moved: boolean): Segment {
   return {
     restore,
+    moved,
+    retried: false,
     segment,
     ctrl: new AbortController(),
     buf: '',
@@ -422,6 +473,13 @@ function newSegment(segment: number, partial: string, restore = ''): Segment {
 const movedField = (moved: boolean) => (moved ? { moved: true as const } : {});
 
 const clamp = (n: number, max: number) => Math.min(Math.max(0, n), max);
+
+/** Did this segment leave so little that the text it cut is the better answer? */
+function shouldRestore(seg: Segment, now: string): boolean {
+  if (seg.restore === '') return false;
+  return !seg.visible || (seg.restore.length >= MIN_RESTORE_CHARS && now.length * 2 < seg.restore.length);
+}
+
 const WS_END = /\s$/;
 const WS_START = /^\s+/;
 
@@ -454,10 +512,42 @@ export function overlapLength(partial: string, head: string): number {
   return 0;
 }
 
-/** Strip a repeated overlap, then collapse doubled whitespace at the seam. */
+/** Strip a repeated overlap, then repair the whitespace at the seam. */
 export function stripContinuation(partial: string, head: string): string {
   const rest = head.slice(overlapLength(partial, head));
-  return WS_END.test(partial) ? rest.replace(WS_START, '') : rest;
+  if (WS_END.test(partial)) return rest.replace(WS_START, '');
+  // "...ship." + "Next": two sentences, not one word.
+  return /[.!?:;,]$/.test(partial) && /^[\p{L}\p{N}]/u.test(rest) ? ` ${rest}` : rest;
+}
+
+const normalized = (s: string) => s.toLowerCase().replace(/\s+/g, ' ').trimStart();
+
+/**
+ * Where a continuation starts over instead of continuing: how much of its head
+ * only restates sentences of the partial (`drop`), and whether it could still
+ * turn out to (`hold`). Whole sentences are dropped, once they end.
+ */
+export function restatement(partial: string, head: string): { hold: boolean; drop: number } {
+  const starts = partial.split(/(?<=[.!?\n])\s+/).map(normalized);
+  let at = 0;
+  for (;;) {
+    const rest = head.slice(at);
+    const n = normalized(rest);
+    if (n === '') return { hold: at > 0, drop: at };
+    const probe = n.slice(0, RESTATE_CHARS);
+    if (!starts.some((s) => s.startsWith(probe))) return { hold: false, drop: at };
+    if (n.length < RESTATE_CHARS) return { hold: true, drop: at };
+    const end = /[.!?\n](?:\s+|$)/.exec(rest);
+    if (!end) return { hold: true, drop: at };
+    at += end.index + end[0].length;
+  }
+}
+
+/** Index just past the partial's last finished sentence, or 0 when it has none. */
+export function lastSentenceEnd(partial: string): number {
+  let end = 0;
+  for (const m of partial.matchAll(/[.!?\n]+(?:\s+|$)/g)) end = m.index + m[0].length;
+  return end;
 }
 
 export function startGeneration(actor: ConversationActor, a: StartArgs): Generation {
@@ -473,16 +563,25 @@ export function reopenGeneration(
   actor: ConversationActor,
   messageId: string,
   steers: string[],
-  opts: SegmentOptions = { moved: false },
+  opts: SegmentOptions & { resume?: boolean } = { moved: false },
 ): Generation {
   const m = actor.view.messages.find((x) => x.id === messageId);
   if (!m || m.author.kind !== 'agent') throw new Error(`reopen: no agent message ${messageId}`);
   if (m.status === 'streaming' || actor.generations.has(messageId)) {
     throw new Error(`reopen: message ${messageId} is still live`);
   }
-  const startEv = actor.eventsUpTo(m.startSeq).at(-1);
+  const startEv = actor.eventAt(m.startSeq);
   const effort: Effort = startEv?.type === 'message_started' ? startEv.effort : 'low';
   return new Generation(actor, {
-    reopen: { messageId, agentId: m.author.agentId, hop: m.hop, effort, segment: m.segment + 1, steers, moved: opts.moved },
+    reopen: {
+      messageId,
+      agentId: m.author.agentId,
+      hop: m.hop,
+      effort,
+      segment: m.segment + 1,
+      steers,
+      moved: opts.moved,
+      resume: opts.resume,
+    },
   });
 }
